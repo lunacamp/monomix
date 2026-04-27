@@ -244,13 +244,21 @@ between tokens. The `%`-to-end-of-line comment is consumed inline and produces n
 ```rust
 #[derive(Clone, PartialEq, Debug)]
 pub enum Token {
-    // Literals
-    Integer(num_bigint::BigInt),
+    // Literals — small/big integer split mirrors ExprPool's SmallInt fast path
+    // (see designs/expression-dag.md §3.4). Avoids BigInt heap allocations for
+    // the overwhelmingly common case of i64-fitting literals.
+    SmallInt(i64),
+    BigInt(Box<num_bigint::BigInt>),
     Float(f64),
-    Ident(InternedStr),         // interned immediately in the ExprPool string table
+    /// Identifier carries the source span only — resolved to InternedStr by the
+    /// parser at use-site. This decouples the lexer from ExprPool, so the lexer
+    /// is reusable for tooling (LSP, formatter, fuzz minimization) that has no
+    /// pool. Lowercase normalization is applied at intern time, not at lex time.
+    Ident(Span),
 
-    // Operators
-    Plus, Minus, Star, Slash, Caret, StarStar,  // ^ and ** both mean pow
+    // Operators (canonicalized at lex time)
+    Plus, Minus, Star, Slash,
+    Pow,                        // both `^` and `**` lex to this token
     Assign,                     // :=
     Equals,                     // =
     Comma, LParen, RParen,
@@ -264,6 +272,21 @@ pub enum Token {
     // Sentinel
     Eof,
 }
+
+/// Payload-free `Copy` discriminant for cheap peeking. Pratt's binding-power
+/// dispatch and statement-prefix detection only need the kind; cloning a full
+/// `Token` (which contains a `Box<BigInt>`) on every peek would allocate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TokenKind {
+    SmallInt, BigInt, Float, Ident,
+    Plus, Minus, Star, Slash, Pow,
+    Assign, Equals, Comma, LParen, RParen,
+    Semi, Dollar, KwComment, Eof,
+}
+
+impl Token {
+    pub fn kind(&self) -> TokenKind { /* trivial match */ }
+}
 ```
 
 **Rational literal handling.** The sequence `INTEGER "/" INTEGER` is not fused into a single
@@ -273,15 +296,30 @@ pattern `Integer Slash Integer` and calls `pool.rational()` directly. This is a 
 concern, not a lexer-level concern.
 
 **Case insensitivity.** REDUCE identifiers are case-insensitive: `SIN`, `Sin`, `sin` all mean
-the same function. The lexer normalises identifiers to lowercase before interning. This is done
-in the lexer (not the parser) so that the interned `InternedStr` for `x` and `X` is the same
-index.
+the same function. Lowercase normalisation happens at *interning time* in the parser, not in
+the lexer (the lexer only emits `Token::Ident(Span)`). The parser slices `source[span]`,
+lowercases into a small stack buffer (or heap if >64 chars), and interns the lowercase form so
+that the `InternedStr` for `x` and `X` is the same index.
+
+**Operator canonicalization.** `^` and `**` both lex to `Token::Pow`. The original spelling
+is recoverable from the span if needed for diagnostics. This removes a redundant arm from
+every downstream `match` on operator tokens.
 
 **Number scanning:**
-- Integer: `[0-9]+` not followed by `.` or `e`/`E`.
-- Float: `[0-9]+ '.' [0-9]* ([eE] [+-]? [0-9]+)?` or `[0-9]+ [eE] [+-]? [0-9]+`.
-- Integer parsing uses `BigInt::parse_bytes` to avoid overflow.
+- Integer: `[0-9]+` not followed by `.` or `e`/`E`. The lexer first attempts `i64::from_str`;
+  on overflow it falls back to `BigInt::parse_bytes`. Emits `Token::SmallInt(i64)` or
+  `Token::BigInt(Box<BigInt>)` accordingly. This makes the common case allocation-free.
+- Float: `[0-9]+ '.' [0-9]* ([eE] [+-]? [0-9]+)?` or `[0-9]+ [eE] [+-]? [0-9]+`. The literal
+  forms `inf`, `nan`, `+inf`, `-nan` are **rejected** at lex time with
+  `DiagnosticCode::InvalidNumericLiteral` — REDUCE has no syntax for them, and admitting them
+  would let users build symbolic nodes that violate `ExprPool` invariants.
 - Float parsing uses `f64::from_str` (via `str::parse`).
+
+**Length caps.** Identifiers and numeric literals are capped at 1024 source bytes. Exceeding
+the cap emits `DiagnosticCode::IdentifierTooLong` or `NumericLiteralTooLong` and consumes the
+oversized run as a single error token. This is defensive against fuzzer-generated pathological
+input (`aaa...aaa` of arbitrary length) and complements the "no panics on any input"
+requirement with "no unbounded allocations on any input".
 
 **Lexer struct:**
 
@@ -289,21 +327,32 @@ index.
 struct Lexer<'s> {
     src: &'s str,
     pos: usize,
-    /// One token of lookahead, eagerly filled.
-    peeked: Option<(Token, Span)>,
-    /// Shared string table for identifier interning.
-    pool: &'s mut ExprPool,
+    /// Two-slot lookahead ring buffer. [0] is the next token; [1] is the
+    /// after-next (only filled when peek_at(1) is called). This is the only
+    /// place lookahead exceeds one token, used for `IDENT :=` detection at
+    /// statement start (§3.4).
+    buffer: ArrayVec<(Token, Span), 2>,
 }
 
 impl<'s> Lexer<'s> {
+    /// Borrow the next token without consuming it. Fills slot 0 if empty.
     fn peek(&mut self) -> &(Token, Span);
+    /// Cheap kind-only peek — does not clone the payload. Used in the Pratt
+    /// inner loop for binding-power dispatch.
+    fn peek_kind(&mut self) -> TokenKind;
+    /// Borrow the token at offset 0 or 1 without consuming. `peek_at(1)` fills
+    /// both slots. Calling with offset > 1 is a programming error.
+    fn peek_at(&mut self, offset: usize) -> &(Token, Span);
+    /// Consume and return the next token (drains slot 0; slot 1 shifts down).
     fn next(&mut self) -> (Token, Span);
     fn skip_whitespace_and_line_comments(&mut self);
 }
 ```
 
-The lexer holds a `&mut ExprPool` exclusively to intern identifier strings. This is the only
-reason the pool is mutably borrowed during lexing — span-only reads happen outside the lexer.
+The lexer is now self-contained — no `&mut ExprPool` dependency. Identifier tokens carry only
+their source span; the parser performs the lowercase + intern step at use-site. This separation
+means the lexer is reusable for any tool that needs tokenization without a populated pool
+(syntax highlighter, formatter, future LSP).
 
 ### 3.2 Parser — Pratt (top-down operator precedence)
 
@@ -313,24 +362,27 @@ without ad hoc grammar transformations.
 
 The central data structure is binding power — a `(left_bp, right_bp)` pair per infix operator:
 
+Binding-power tables operate on `TokenKind` (Copy) so the Pratt inner loop never clones a
+`Token`. Numeric values are spaced by 10 to leave room for future precedence levels (e.g.,
+bitwise operators in a later phase) without renumbering existing constants.
+
 ```rust
-fn infix_bp(tok: &Token) -> Option<(u8, u8)> {
-    match tok {
-        Token::Equals   => Some((10, 0)),    // non-associative: (10, 0) forbids chaining
-        Token::Plus
-        | Token::Minus  => Some((20, 21)),   // left-associative
-        Token::Star
-        | Token::Slash  => Some((30, 31)),   // left-associative
-        Token::Caret
-        | Token::StarStar => Some((50, 49)), // right-associative: right_bp < left_bp
-        _               => None,
+fn infix_bp(kind: TokenKind) -> Option<(u8, u8)> {
+    match kind {
+        TokenKind::Equals  => Some((10, 0)),    // non-associative: (10, 0) forbids chaining
+        TokenKind::Plus
+        | TokenKind::Minus => Some((20, 21)),   // left-associative
+        TokenKind::Star
+        | TokenKind::Slash => Some((30, 31)),   // left-associative
+        TokenKind::Pow     => Some((50, 49)),   // right-associative: right_bp < left_bp
+        _                  => None,
     }
 }
 
-fn prefix_bp(tok: &Token) -> Option<u8> {
-    match tok {
-        Token::Minus => Some(40), // unary minus, higher than * but lower than ^
-        _            => None,
+fn prefix_bp(kind: TokenKind) -> Option<u8> {
+    match kind {
+        TokenKind::Minus => Some(40), // unary minus, higher than * but lower than ^
+        _                => None,
     }
 }
 ```
@@ -339,40 +391,41 @@ fn prefix_bp(tok: &Token) -> Option<u8> {
 
 ```rust
 fn parse_expr(&mut self, min_bp: u8) -> Result<ExprId, ()> {
-    // 1. Parse prefix or atom
+    // 1. Parse prefix or atom — `next()` *moves* the token out (no clone).
     let (tok, tok_span) = self.lexer.next();
     let mut lhs = match tok {
-        Token::Integer(n) => self.pool.integer(n),
-        Token::Float(f)   => self.pool.float(f),
-        Token::Ident(s)   => self.parse_ident_or_call(s, tok_span)?,
-        Token::LParen     => {
+        Token::SmallInt(n)  => self.pool.small_int(n),
+        Token::BigInt(n)    => self.pool.big_int(*n),
+        Token::Float(f)     => self.pool.float(f),
+        Token::Ident(span)  => self.parse_ident_or_call(span)?,
+        Token::LParen       => {
             let inner = self.parse_expr(0)?;
-            self.expect(Token::RParen)?;
+            self.expect(TokenKind::RParen)?;
             inner
         }
-        Token::Minus      => {
-            let right = self.parse_expr(prefix_bp(&Token::Minus).unwrap())?;
+        Token::Minus        => {
+            let right = self.parse_expr(prefix_bp(TokenKind::Minus).unwrap())?;
             self.pool.neg(right)
         }
-        // Rational literal shortcut: bare integer followed by '/'
-        _ => return Err(self.emit_unexpected(tok, tok_span)),
+        other => return Err(self.emit_unexpected(other, tok_span)),
     };
 
-    // 2. Check for rational: Integer '/' Integer
-    if let ExprNode::SmallInt(_) | ExprNode::BigInt(_) = self.pool.get(lhs) {
-        if matches!(self.lexer.peek().0, Token::Slash) {
-            if let Some(rhs_int) = self.peek_integer_after_slash() {
-                lhs = self.pool.rational_from_ints(lhs, rhs_int)?;
-            }
+    // 2. Rational literal shortcut: SmallInt/BigInt '/' SmallInt/BigInt.
+    //    peek_kind() avoids cloning the token's payload.
+    if matches!(self.pool.get(lhs), ExprNode::SmallInt(_) | ExprNode::BigInt(_))
+        && self.lexer.peek_kind() == TokenKind::Slash
+    {
+        if let Some(rhs_int) = self.try_consume_rational_denominator() {
+            lhs = self.pool.rational_from_ints(lhs, rhs_int)?;
         }
     }
 
-    // 3. Pratt infix loop
+    // 3. Pratt infix loop — kind-only peek, no payload clone.
     loop {
-        let (op_tok, op_span) = self.lexer.peek().clone();
-        let Some((left_bp, right_bp)) = infix_bp(&op_tok) else { break };
+        let op_kind = self.lexer.peek_kind();
+        let Some((left_bp, right_bp)) = infix_bp(op_kind) else { break };
         if left_bp <= min_bp { break }
-        self.lexer.next(); // consume operator
+        let (op_tok, op_span) = self.lexer.next(); // consume operator
 
         let rhs = self.parse_expr(right_bp)?;
         lhs = self.build_infix(op_tok, lhs, rhs, op_span)?;
@@ -382,36 +435,59 @@ fn parse_expr(&mut self, min_bp: u8) -> Result<ExprId, ()> {
 }
 ```
 
+Note the absence of `Token::clone()` in the inner loop — the only owned data inside a `Token`
+is the `Box<BigInt>` of `Token::BigInt`, which would otherwise allocate on every peek. With
+the `peek_kind()` design, the loop is allocation-free regardless of operand size.
+
 The `build_infix` helper maps operator tokens to `pool.add()`, `pool.mul()`, etc. `Equals`
 produces `pool.eq(lhs, rhs)`.
 
 ### 3.3 Built-in function detection
 
-When the parser encounters `IDENT "("`, it calls `parse_ident_or_call()`. If the identifier
-matches a known built-in, it dispatches to a dedicated handler; otherwise it falls through to
-generic function-call parsing.
+When the parser encounters `IDENT "("`, it calls `parse_ident_or_call()`. Built-in dispatch
+uses a **pre-interned `BuiltinTable`** — built-in names are interned once at `ExprPool`
+construction time, and dispatch becomes integer-equality comparison on `InternedStr` indices
+rather than O(name length) string comparisons through `pool.str_of()`.
 
 ```rust
-fn parse_ident_or_call(&mut self, name: InternedStr, span: Span) -> Result<ExprId, ()> {
-    if !matches!(self.lexer.peek().0, Token::LParen) {
-        // Plain symbol reference
-        return Ok(self.pool.symbol_by_id(name));
-    }
-    // Consume '('
-    self.lexer.next();
+/// Indices of built-in function names, interned once at pool construction.
+/// Equality comparison on InternedStr is a single u32 compare.
+pub struct BuiltinTable {
+    pub df:       InternedStr,
+    pub int_:     InternedStr,
+    pub solve:    InternedStr,
+    pub factor:   InternedStr,
+    pub expand:   InternedStr,
+    pub simplify: InternedStr,
+    pub sub:      InternedStr,
+}
 
-    match self.pool.str_of(name) {
-        "df"       => self.parse_df(span),
-        "int"      => self.parse_int_stub(span),
-        "solve"    => self.parse_solve(span),
-        "factor"   => self.parse_factor_stub(span),
-        "expand"   => self.parse_unary_builtin(FnTag::Expand, span),
-        "simplify" => self.parse_unary_builtin(FnTag::Simplify, span),
-        "sub"      => self.parse_sub(span),
-        _          => self.parse_generic_call(name, span),
+fn parse_ident_or_call(&mut self, ident_span: Span) -> Result<ExprId, ()> {
+    // Resolve span → lowercase → InternedStr at use-site.
+    let name = self.intern_lowercased(ident_span);
+
+    if self.lexer.peek_kind() != TokenKind::LParen {
+        return Ok(self.pool.symbol_by_id(name));   // plain symbol reference
+    }
+    self.lexer.next(); // consume '('
+
+    let bt = &self.builtins;
+    match name {
+        n if n == bt.df       => self.parse_df(ident_span),
+        n if n == bt.int_     => self.parse_int_stub(ident_span),
+        n if n == bt.solve    => self.parse_solve(ident_span),
+        n if n == bt.factor   => self.parse_factor_stub(ident_span),
+        n if n == bt.expand   => self.parse_unary_builtin(FnTag::Expand, ident_span),
+        n if n == bt.simplify => self.parse_unary_builtin(FnTag::Simplify, ident_span),
+        n if n == bt.sub      => self.parse_sub(ident_span),
+        _                     => self.parse_generic_call(name, ident_span),
     }
 }
 ```
+
+This eliminates the per-identifier string traffic through `pool.str_of()` that the naive
+dispatch would incur on every call site, including all *user* identifiers (which always
+fall through to the `_` arm).
 
 Each handler parses its specific argument list and returns an `ExprId`. Stubs (`int`, `factor`)
 parse their arguments normally but emit an `ExprId` node tagged with a `UnsupportedStub` marker
@@ -440,22 +516,21 @@ Otherwise it parses a plain expression statement.
 
 ```rust
 fn parse_stmt(&mut self) -> Result<Option<Stmt>, ()> {
-    // Detect assignment
-    if let (Token::Ident(name), _) = self.lexer.peek().clone() {
-        // Two-token lookahead: intern the name, save, peek the second token
-        // This is the only place we need two-token lookahead.
-        if self.second_token_is_assign() {
-            return self.parse_assign_stmt(name);
-        }
+    // Detect assignment via two-token lookahead — the only place in the
+    // grammar where we look further than one token ahead.
+    if self.lexer.peek_kind() == TokenKind::Ident
+        && self.lexer.peek_at(1).0.kind() == TokenKind::Assign
+    {
+        return self.parse_assign_stmt();
     }
     self.parse_expr_stmt()
 }
 ```
 
-Two-token lookahead is the *only* place lookahead exceeds one token. Rather than maintaining a
-general multi-token lookahead buffer, the parser calls `lexer.peek()` (for token 1) and then
-`lexer.peek_second()` (for token 2, implemented as "consume + store in a two-slot buffer").
-This keeps the lexer simple while handling the one ambiguity in the grammar.
+The lexer's `peek_at(offset)` API (§3.1) materialises the second slot on demand. After this
+check, `parse_assign_stmt` consumes both tokens via two `lexer.next()` calls. The `ArrayVec<2>`
+buffer caps lookahead at exactly two tokens — no general multi-token buffer, no risk of
+unbounded lookahead creeping in as the grammar evolves.
 
 The returned `Stmt` for an assignment wraps an `ExprId` that is a `pool.eq(symbol, value)` node
 with a special `Assign` wrapper:
@@ -495,6 +570,12 @@ pub type SpanMap = FxHashMap<ExprId, Span>;
 span(s) out of the map before the map is dropped. This keeps the hot-path data structures
 (arena, dedup map) span-free while still providing accurate diagnostics.
 
+**Phase 2 optimisation (deferred):** `FxHashMap<ExprId, Span>` is convenient but heavyweight
+— ~48 B/entry vs 8 B for the span itself. Since lookup happens only on diagnostic emission
+(off the hot path), a sorted `Vec<(ExprId, Span)>` (binary-searched) or parallel arrays
+`(Vec<ExprId>, Vec<Span>)` would cut memory ~5×. Defer until profiling shows `SpanMap`
+visible in memory traces.
+
 **Span construction rules:**
 - Atom: span of the token itself.
 - Unary `-expr`: span from `-` token to end of `expr`.
@@ -505,28 +586,34 @@ span(s) out of the map before the map is dropped. This keeps the hot-path data s
 ### 3.6 Error recovery
 
 The parser uses **synchronisation-point recovery**: on any parse error, it emits a `Diagnostic`,
-then advances the token stream until it finds a `;`, `$`, or `EOF`. Parsing resumes at the
-next statement.
+then advances the token stream until it finds a `;` or `$` *at paren depth 0*, or `EOF`.
+Parsing resumes at the next statement. Tracking paren depth is essential because Phase 2
+constructs (`for ... do ... ;`, `procedure ... ; ... end ;`) will admit nested terminators —
+without depth-tracking, recovery would consume them and resume in the wrong place.
 
 ```rust
 fn synchronise(&mut self) {
+    let mut depth: u32 = 0;
     loop {
-        match self.lexer.peek().0 {
-            Token::Semi | Token::Dollar | Token::Eof => break,
+        match self.lexer.peek_kind() {
+            TokenKind::LParen => { depth += 1; self.lexer.next(); }
+            TokenKind::RParen if depth > 0 => { depth -= 1; self.lexer.next(); }
+            TokenKind::Semi | TokenKind::Dollar if depth == 0 => break,
+            TokenKind::Eof => return,
             _ => { self.lexer.next(); }
         }
     }
-    // Consume the terminator itself so the outer loop sees a clean state
-    if !matches!(self.lexer.peek().0, Token::Eof) {
-        self.lexer.next();
-    }
+    // Consume the terminator itself so the outer loop sees a clean state.
+    self.lexer.next();
 }
 ```
 
 This is the same strategy used by most production compilers (e.g., `rustc` for block-level
-recovery). It guarantees: (a) every statement either produces an `ExprId` or produces exactly
-one `Diagnostic`, (b) parsing never loops forever, (c) a single bad statement does not cascade
-into spurious errors in subsequent statements.
+recovery), augmented with depth tracking. It guarantees: (a) every statement either produces
+an `ExprId` or produces exactly one `Diagnostic`, (b) parsing never loops forever, (c) a
+single bad statement does not cascade into spurious errors in subsequent statements,
+(d) nested grammar constructs (Phase 2+) cannot trick recovery into resuming inside a
+half-parsed structure.
 
 **Error quality.** Diagnostics include the span, a description of what was found, and what was
 expected:
@@ -541,14 +628,25 @@ The `DiagnosticCode` enum enables the Python exception hierarchy to be specific:
 
 ```rust
 pub enum DiagnosticCode {
-    UnexpectedToken { found: String, expected: &'static str },
+    UnexpectedToken { found: TokenKind, expected: &'static str },
     UnterminatedStatement,
     UnbalancedParen,
     InvalidNumericLiteral,
+    NumericLiteralTooLong,
+    IdentifierTooLong,
     MissingArgument { function: &'static str },
     TooManyArguments { function: &'static str, max: usize },
 }
 ```
+
+`UnexpectedToken.found` is `TokenKind` (not `String`) — the user-facing rendering happens at
+diagnostic-print time using a static `kind → display` table, avoiding per-error allocation.
+
+**Phase 2 cleanup (deferred):** `Diagnostic.message: String` is largely redundant with `code`
+(which already encodes the dynamic payload structurally). Once the rendering table is in
+place, consider replacing `message` with `Option<Cow<'static, str>>` for cases where the code
+variant doesn't capture everything, or removing it entirely. This eliminates per-error
+allocations in fuzz workloads (where errors are the common case).
 
 ### 3.7 Integration with ExprPool
 
@@ -795,6 +893,9 @@ is unaffected because `InternedStr` is already an opaque index. This is a lexer-
 - Parse a 1 KB interactive session transcript (20 statements). Target: <200 µs.
 - Parse a 100 KB script file (simulated `load` scenario). Target: <20 ms.
 - Lexer throughput in isolation (tokens/sec). Target: ≥500K tokens/sec.
+- **Pessimal input** — 1000 random tokens that trigger error recovery on most statements.
+  Target: <2 ms. Confirms recovery and diagnostic emission stay within budget under fuzz-like
+  conditions; if this regresses, `Diagnostic.message` allocation is the likely cause (§3.6).
 
 ### 6.4 Fuzz testing (`cargo-fuzz`)
 
@@ -817,39 +918,58 @@ is unaffected because `InternedStr` is already an opaque index. This is a lexer-
 
 ### Phase 1 — Core implementation
 
-1. [ ] Create `crates/monomix-kernel/src/lexer.rs` with `Token`, `Span`, `Lexer` (single-token
-       lookahead, two-slot lookahead for `:=` detection)
-2. [ ] Create `crates/monomix-kernel/src/parser/ast.rs` with `Stmt`, `StmtKind`, `OutputMode`,
-       `Diagnostic`, `DiagnosticCode`, `ParseResult`, `SpanMap`
-3. [ ] Implement Pratt expression parser in `crates/monomix-kernel/src/parser/expr.rs` with
-       binding-power tables for `+`, `-`, `*`, `/`, `^`/`**`, `=`, unary `-`
-4. [ ] Implement statement parser (`parse_stmt`, `parse_assign_stmt`, `parse_expr_stmt`,
-       `synchronise` for error recovery) in `crates/monomix-kernel/src/parser/stmt.rs`
-5. [ ] Implement built-in dispatch: `df`, `sub`, `simplify`, `expand`, `solve` (full);
-       `int`, `factor` (UnsupportedStub)
-6. [ ] Implement case-insensitive identifier normalisation in the lexer (lowercase before
-       interning via `ExprPool`)
-7. [ ] Implement `Span` side-table (`SpanMap`); thread it through parse calls
-8. [ ] Wire up `parse()` public entry point in `crates/monomix-kernel/src/lib.rs`
-9. [ ] Implement `KernelError::Parse(Vec<Diagnostic>)` variant and map to `monomix.ParseError`
-       in the PyO3 boundary (`crates/monomix-py/src/error.rs`)
+1. [ ] Create `crates/monomix-kernel/src/lexer.rs` with `Token`, `TokenKind`, `Span`, and
+       `Lexer` using a 2-slot `ArrayVec` lookahead buffer (§3.1)
+2. [ ] Implement `Token::SmallInt(i64)` / `Token::BigInt(Box<BigInt>)` split — try `i64::from_str`
+       first, fall back to `BigInt` only on overflow (§3.1)
+3. [ ] Implement `TokenKind` (Copy, payload-free) and `Lexer::peek_kind()` for cheap inner-loop
+       dispatch (§3.1, §3.2)
+4. [ ] Decouple lexer from `ExprPool`: emit `Token::Ident(Span)`; intern + lowercase happens at
+       parser use-site (§3.1)
+5. [ ] Canonicalize `^` and `**` to single `Token::Pow` at lex time (§3.1)
+6. [ ] Reject `inf`/`nan` float literals at lex time; enforce 1024-byte caps on identifier and
+       numeric-literal length (§3.1)
+7. [ ] Create `crates/monomix-kernel/src/parser/ast.rs` with `Stmt`, `StmtKind`, `OutputMode`,
+       `Diagnostic`, `DiagnosticCode`, `ParseResult`, `SpanMap`. `DiagnosticCode::UnexpectedToken`
+       carries `TokenKind` not `String` (§3.6)
+8. [ ] Implement Pratt expression parser in `crates/monomix-kernel/src/parser/expr.rs` with
+       `TokenKind`-keyed binding-power tables. No `Token::clone()` in the inner loop (§3.2)
+9. [ ] Implement statement parser (`parse_stmt`, `parse_assign_stmt`, `parse_expr_stmt`,
+       paren-depth-aware `synchronise` for error recovery) in `crates/monomix-kernel/src/parser/stmt.rs`
+       (§3.4, §3.6)
+10. [ ] Implement `BuiltinTable` — pre-intern `df`/`int`/`solve`/`factor`/`expand`/`simplify`/`sub`
+        into `InternedStr` indices; dispatch via integer equality, not string compare (§3.3)
+11. [ ] Implement built-in dispatch handlers: `df`, `sub`, `simplify`, `expand`, `solve` (full);
+        `int`, `factor` (UnsupportedStub) (§3.3)
+12. [ ] Implement `Span` side-table (`SpanMap` as `FxHashMap` for now); thread it through parse
+        calls (§3.5)
+13. [ ] Wire up `parse()` public entry point in `crates/monomix-kernel/src/lib.rs`
+14. [ ] Implement `KernelError::Parse(Vec<Diagnostic>)` variant and map to `monomix.ParseError`
+        in the PyO3 boundary (`crates/monomix-py/src/error.rs`)
 
 ### Phase 1 — Verification
 
-10. [ ] Write unit tests for all lexer token/span cases (§6.1 lexer section)
-11. [ ] Write unit tests for all expression precedence and associativity cases (§6.1 expr section)
-12. [ ] Write unit tests for statement parsing, assignment, terminator, multi-statement (§6.1 stmt section)
-13. [ ] Write unit tests for all built-in argument forms (`df`, `sub`, stubs)
-14. [ ] Write unit tests for all error recovery cases (§6.1 recovery section)
-15. [ ] Write `proptest` suite (§6.2)
-16. [ ] Set up criterion benchmarks (§6.3)
-17. [ ] Set up `cargo-fuzz` target with legacy `.tst` seed corpus (§6.4)
-18. [ ] Curate and commit golden corpus test set (§6.5)
-19. [ ] Verify: `cargo-fuzz` ≥1 h with no panics (Phase 1.12 success criterion)
+15. [ ] Write unit tests for all lexer token/span cases including `SmallInt`/`BigInt` boundary,
+        `inf`/`nan` rejection, length caps (§6.1)
+16. [ ] Write unit tests for all expression precedence and associativity cases (§6.1)
+17. [ ] Write unit tests for statement parsing, assignment, terminator, multi-statement (§6.1)
+18. [ ] Write unit tests for all built-in argument forms (`df`, `sub`, stubs) (§6.1)
+19. [ ] Write unit tests for error recovery, including paren-depth-aware sync points (§6.1)
+20. [ ] Write `proptest` suite (§6.2)
+21. [ ] Set up criterion benchmarks including pessimal-input case (§6.3)
+22. [ ] Set up `cargo-fuzz` target with legacy `.tst` seed corpus (§6.4)
+23. [ ] Curate and commit golden corpus test set (§6.5)
+24. [ ] Verify: `cargo-fuzz` ≥1 h with no panics (Phase 1.12 success criterion)
 
-### Phase 2 — Grammar extensions (deferred)
+### Phase 2 — Optimisation and grammar extensions (deferred)
 
-20. [ ] Add `Token::KwProcedure`, `KwFor`, `KwWhile`, `KwDo`, `KwLet`, `KwEnd` to lexer
-21. [ ] Implement `parse_procedure()` and `parse_for()` / `parse_while()` in stmt parser
-22. [ ] Add `Token::Tilde` and `parse_pattern()` for `let`-rules
-23. [ ] Evaluate per-request pool isolation for MCP server (§5.2) based on Phase 1.5 profiling
+25. [ ] If profiling shows pressure: replace `SpanMap = FxHashMap` with sorted
+        `Vec<(ExprId, Span)>` or parallel arrays (§3.5)
+26. [ ] Reconsider `Diagnostic.message: String` — replace with `Option<Cow<'static, str>>` or
+        remove entirely once static rendering table is in place (§3.6)
+27. [ ] Add `Token::KwProcedure`, `KwFor`, `KwWhile`, `KwDo`, `KwLet`, `KwEnd` to lexer (§5.1)
+28. [ ] Implement `parse_procedure()` and `parse_for()` / `parse_while()` in stmt parser (§5.1)
+29. [ ] Add `Token::Tilde` and `parse_pattern()` for `let`-rules (§5.1)
+30. [ ] Evaluate per-request pool isolation for MCP server (§5.2) based on Phase 1.5 profiling
+31. [ ] Incremental REPL re-parse: track byte offset of last completed statement, skip past it
+        on continuation input (§5.3)
