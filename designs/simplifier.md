@@ -33,8 +33,17 @@ It must support every transformation listed in SCOPE.md §1.7:
   `0 * x → 0`, `x - x → 0`. **These are guaranteed by `ExprPool` interning at construction
   time** (see `designs/expression-dag.md` §3.1, Invariant 5). The simplifier does not
   re-implement them; it relies on the pool returning normalized handles.
-- **Pythagorean identity.** `sin(u)^2 + cos(u)^2 → 1` for any sub-expression `u`, including
-  when the pair appears alongside other addends: `a + sin(u)^2 + b + cos(u)^2 → a + b + 1`.
+- **Pythagorean identity (separate entry point, not the default).** `sin(u)^2 + cos(u)^2 → 1`
+  is offered via a distinct `simplify_trig` entry point, **not** as a default rule of
+  `simplify`. Original REDUCE's `simp` does not auto-collapse `sin^2 + cos^2`
+  ([compact.rlg:7-11](../legacy/reduce-algebra-code-r7357-trunk/packages/misc/compact.rlg)
+  shows `cos(x)^2 + sin(x)^2 - 1` surviving plain simplification); REDUCE only collapses
+  it when the user explicitly invokes `compact(expr, {cos x^2 + sin x^2 = 1})`. Reasons
+  to match that: (a) the identity is non-invertible — once collapsed, `1 - sin^2` form is
+  lost, breaking subsequent `sqrt(1-sin^2)` reductions; (b) it's arbitrary among many trig
+  identities (`tan^2 + 1 = sec^2`, half-angle, double-angle, ...) — picking one as default
+  is non-confluent with user intent; (c) golden-corpus testing (§6.5) against the legacy
+  `.rlg` files needs to keep `sin^2 + cos^2` un-collapsed to match REDUCE byte-for-byte.
 - **Idempotence.** `simplify(simplify(e)) ≡ simplify(e)` structurally (same `ExprId`).
   Listed as a property-based invariant in SCOPE.md §1.12.
 
@@ -60,12 +69,32 @@ It must support every transformation listed in SCOPE.md §1.7:
   caller-owned scratch buffers. No global rule database; no thread-local interning.
 - The simplifier **must not mutate inputs in place** — interned nodes are immutable.
 - The simplifier is **bounded in Phase 1**: only the transformations enumerated in §1.1
-  are performed. Out of scope: trigonometric identities beyond Pythagorean
-  (`sin(2x) = 2 sin(x) cos(x)` etc.), logarithm/exponential combination, partial-fraction
-  decomposition, algebraic-number simplification, context-aware assumptions (`assume(x>0)`).
-  All deferred to Phase 2 §2.6.
+  are performed. Pythagorean lives behind the separate `simplify_trig` entry point.
+  Out of scope: trigonometric identities beyond Pythagorean (`sin(2x) = 2 sin(x) cos(x)`
+  etc.), logarithm/exponential combination, partial-fraction decomposition, algebraic-number
+  simplification, context-aware assumptions (`assume(x>0)`). All deferred to Phase 2 §2.6.
 - **No automatic simplification post-differentiation** (SCOPE.md §1.4). The simplifier is
   invoked only when the user (or a kernel routine) explicitly requests it.
+
+### 1.4 Switch defaults — implicit settings vs. REDUCE
+
+Original REDUCE's simplifier is parameterized by ~20 session switches. Phase 1 ships a
+fixed combination; the table below pins the implicit defaults so that golden-corpus
+divergence (§6.5) is understood up front rather than rediscovered in review:
+
+| REDUCE switch | REDUCE default | Phase 1 behaviour | Notes |
+|---------------|----------------|--------------------|-------|
+| `expandexpt`  | on  | **off** (preserve `(a+b)^2`) | Deliberate divergence — keeping structure is friendlier for derivatives and substitutions; `expand()` is the explicit operation |
+| `mcd`         | on  | **off** (no forced common denominator) | `1/x + 1/y` stays as a sum; matches §3.5 "leave inexact divisions alone" |
+| `gcd`         | off | **off** (only exact-remainder cancellation) | §3.5 — matches REDUCE default |
+| `rationalize` | off | **off** (Phase 1 does not implement) | Deferred to Phase 2 |
+| `combinelogs` | off | **off** (no log combination) | Out of Phase 1 scope |
+| `rounded` (float mode) | off | **off** (floats are atoms, not contagious) | See §3.2 — matches REDUCE; `Numeric` mode is opt-in |
+| `precise`     | on  | **on** (no unsafe `(x^a)^b` consolidation) | §3.4 — matches REDUCE on the integer/rational guard |
+
+The defaults are surfaced through a `SimplifierConfig` struct on `Session` (per
+SCOPE.md §1.3); Phase 1 only honours `float_mode` and `gcd` actively, but the struct shape
+exists so Phase 2 additions are field-additive rather than API-breaking. See §2.1.
 
 ---
 
@@ -74,28 +103,64 @@ It must support every transformation listed in SCOPE.md §1.7:
 ### 2.1 Public API
 
 ```rust
-/// Simplify `root` and return the canonical ExprId.
-/// Idempotent: simplify(pool, simplify(pool, e)) == simplify(pool, e).
+/// Default symbolic simplifier — numeric folding, like-terms, power consolidation,
+/// rational cancellation. Does NOT apply trigonometric identities.
+/// Idempotent: simplify(pool, cfg, simplify(pool, cfg, e)) == simplify(pool, cfg, e).
 /// Never panics; runtime errors (e.g. encountered division by zero) are returned.
-pub fn simplify(pool: &mut ExprPool, root: ExprId) -> Result<ExprId, KernelError>;
-
-/// Same as `simplify`, but with a caller-owned scratch cache for amortizing cost
-/// across multi-pass pipelines (e.g. simplify ∘ substitute ∘ differentiate).
-/// The cache maps `ExprId → ExprId` (input → simplified) for the current pool generation.
-pub fn simplify_with_cache(
+pub fn simplify(
     pool: &mut ExprPool,
+    cfg: &SimplifierConfig,
+    cache: &mut SimplifyCache,
     root: ExprId,
-    cache: &mut FxHashMap<ExprId, ExprId>,
 ) -> Result<ExprId, KernelError>;
+
+/// Trigonometric simplifier — applies the Pythagorean identity (and any future
+/// trig rules from §2.6). Composes with `simplify`; the user invokes it explicitly,
+/// matching REDUCE's `compact()` discipline.
+pub fn simplify_trig(
+    pool: &mut ExprPool,
+    cfg: &SimplifierConfig,
+    cache: &mut SimplifyCache,
+    root: ExprId,
+) -> Result<ExprId, KernelError>;
+
+/// Configuration mirroring the REDUCE switches relevant to simplification.
+/// Defaults match §1.4. Owned by `Session`.
+#[derive(Clone, Debug)]
+pub struct SimplifierConfig {
+    /// `Symbolic` (default): floats are opaque atoms, not folded with rationals.
+    /// `Numeric`: floats taint the numeric partition of an Add/Mul (matches `on rounded`).
+    pub float_mode: FloatMode,
+    /// `false` (default): only cancel `Div` when remainder is zero.
+    /// `true`: full polynomial GCD on every Add — matches `on gcd`.
+    pub gcd: bool,
+    /// `false` (default): leave `(a+b)^2` as a power. Phase 2 will honour this.
+    pub expand_powers: bool,
+    /// `false` (default): leave `1/x + 1/y` as a sum. Phase 2 will honour this.
+    pub make_common_denominator: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum FloatMode { Symbolic, Numeric }
+
+/// Session-owned cache from input ExprId → simplified ExprId. Capped at
+/// `SIMPLIFY_CACHE_LIMIT` entries (default 100,000, mirroring REDUCE's `alglist!*`);
+/// on overflow the cache is fully cleared. The pool is monotonic in Phase 1, so
+/// entries remain valid for the entire session lifetime until eviction.
+pub struct SimplifyCache { /* FxHashMap<ExprId, ExprId> + counter */ }
 ```
 
-The pool is monotonic in Phase 1 — `ExprId`s are never reassigned to different content
-(see expression DAG §5.1) — so the cache is safe to reuse across any number of
-`simplify_with_cache` calls within a session. The convenience entry point
-`simplify(pool, root)` allocates a fresh cache per call; long-running pipelines (e.g.
-`simplify ∘ substitute ∘ simplify`) should hold one cache and pass it in. Phase 2's
-generational pool (expression DAG §5.1) will require attaching a generation tag to the
-cache and invalidating on generation change; the API stays the same.
+The cache lives on `Session` (per SCOPE.md §1.3), not per call. This mirrors REDUCE's
+`alglist!*` ([simp.red:182-198](../legacy/reduce-algebra-code-r7357-trunk/packages/alg/simp.red))
+which is a session-wide hash table from prefix-form input to standard-quotient output,
+explicitly capped at 100,000 entries with full-clear eviction. Per-call caches were
+considered and rejected: in a typical pipeline (`simplify ∘ substitute ∘ simplify ∘
+expand ∘ simplify`) every step interns new `ExprId`s, and a per-call cache amounts to
+work that gets thrown away. The cap protects against unbounded growth in long-running
+sessions (e.g. an MCP server handling many requests against one pool).
+
+Phase 2's generational pool (expression DAG §5.1) will tag the cache with a generation
+counter and invalidate on generation change; the API stays the same.
 
 ### 2.2 Component diagram
 
@@ -223,33 +288,58 @@ re-grouping, and pattern-based rewriting.
 ### 3.1 Driver and cache (`driver.rs`)
 
 ```rust
-pub fn simplify_with_cache(
+const MAX_ITERS: u8 = 3;
+pub const SIMPLIFY_CACHE_LIMIT: usize = 100_000;  // mirrors REDUCE's alglist_limit!*
+
+pub fn simplify(
     pool: &mut ExprPool,
+    cfg: &SimplifierConfig,
+    cache: &mut SimplifyCache,
     root: ExprId,
-    cache: &mut FxHashMap<ExprId, ExprId>,
 ) -> Result<ExprId, KernelError> {
-    const MAX_ITERS: u8 = 3;
+    cache.evict_if_full();  // full-clear if entries > SIMPLIFY_CACHE_LIMIT
     let mut current = root;
+    let mut passes: u8 = 0;
     for _ in 0..MAX_ITERS {
-        let next = simplify_one_pass(pool, current, cache)?;
-        if next == current {
-            return Ok(current);
-        }
+        passes += 1;
+        let next = simplify_one_pass(pool, cfg, cache, current, &DEFAULT_RULES)?;
+        if next == current { break; }
         current = next;
     }
-    // The cap is a guarantee, not an error — convergence is asserted in tests.
-    // If we exit here it means a bug in a rule allowed cycling; surface it.
-    debug_assert_eq!(current, simplify_one_pass(pool, current, cache)?,
-        "simplifier failed to converge in {MAX_ITERS} iterations");
+    #[cfg(debug_assertions)]
+    {
+        // Soft contract: Phase 1 rule set converges in ≤2 passes.
+        // The 3rd slot is headroom; a test asserts pass_count ≤ 2 for the built-in set.
+        // If a future rule needs 3, retighten the test deliberately.
+        cache.last_pass_count = passes;
+        debug_assert!(passes <= MAX_ITERS,
+            "simplifier failed to converge in {MAX_ITERS} iterations");
+    }
     Ok(current)
+}
+
+pub fn simplify_trig(
+    pool: &mut ExprPool,
+    cfg: &SimplifierConfig,
+    cache: &mut SimplifyCache,
+    root: ExprId,
+) -> Result<ExprId, KernelError> {
+    // Same driver, but `&TRIG_RULES` is supplied to `simplify_one_pass` — the registry
+    // includes the Pythagorean rule on top of the default set. Composes with `simplify`:
+    // user-facing `simplify_trig` typically calls `simplify` first, then a single
+    // `simplify_trig` pass, then `simplify` again to fold the resulting `1` into siblings.
+    // ...
 }
 
 fn simplify_one_pass(
     pool: &mut ExprPool,
+    cfg: &SimplifierConfig,
+    cache: &mut SimplifyCache,
     root: ExprId,
-    cache: &mut FxHashMap<ExprId, ExprId>,
+    rules: &RuleRegistry,
 ) -> Result<ExprId, KernelError> {
-    map_bottom_up(pool, root, cache, &mut |pool, id| simplify_node(pool, id))
+    map_bottom_up(pool, root, &mut cache.map,
+        &mut |pool, id| simplify_node(pool, cfg, rules, id))
 }
 ```
 
@@ -264,6 +354,31 @@ simplified `ExprId`. Both are valid as long as the pool's `ExprId → ExprNode` 
 is monotonic (Phase 1 guarantee — see expression DAG design §5.1). A future generational
 pool would attach a generation counter to the cache and invalidate on generation change.
 
+**Cache eviction.** Counter-based: every successful insert bumps `cache.count`; when it
+exceeds `SIMPLIFY_CACHE_LIMIT` (default 100,000) the entire cache is dropped and the
+counter resets. This matches REDUCE's `alglist!*` strategy
+([simp.red:182-198](../legacy/reduce-algebra-code-r7357-trunk/packages/alg/simp.red))
+and avoids the cost of LRU bookkeeping on the hot path. For a kernel that lives behind
+an MCP server (SCOPE.md §0.5) handling many requests per session, this bounds steady-state
+memory regardless of request volume.
+
+**Pass-counter exposure for tests.** In debug builds `cache.last_pass_count` is set after
+every call; the proptest in §6.2 asserts `pass_count ≤ 2` for the Phase 1 rule set, *not*
+`≤ MAX_ITERS`. Tightening the test catches "we needed all three slots" silently
+regressing the headroom — if the test fails, the rule set has grown beyond what's been
+analyzed for confluence.
+
+**Determinism caveat.** Stability of canonical-form output across runs depends on the DAG
+design's child-ordering invariant being content-deterministic, not allocation-order
+dependent. See `designs/expression-dag.md` §3.1 Invariant 4: if children are sorted by
+`ExprId` and `ExprId` is `LocalExprId(u32)` (an arena index), two parser runs that intern
+kernels in different orders can produce structurally-equal expressions with different
+`ExprId`s and therefore different "canonical" sort orders. The simplifier inherits this
+property — see §3.3 below where it is exploited for O(1) coefficient extraction. The DAG
+design must guarantee allocation-order determinism (e.g. by interning all atoms in a
+fixed order during pool construction); the simplifier itself does not provide a fallback
+content-based ordering.
+
 ### 3.2 Numeric folding (`numeric.rs`)
 
 Exact arithmetic on `SmallInt`, `BigInt`, `Rational`, and (when present) `Float` children:
@@ -273,11 +388,17 @@ Exact arithmetic on `SmallInt`, `BigInt`, `Rational`, and (when present) `Float`
 /// rational value (or float, if any child is a float — the float taints the partition).
 /// Returns (folded_value_id_or_None, leftover_symbolic_children).
 fn fold_addends(pool: &mut ExprPool, children: &[ExprId])
-    -> (Option<ExprId>, SmallVec<[ExprId; 8]>);
+    -> (Option<ExprId>, SmallVec<[ExprId; 32]>);
 
 fn fold_factors(pool: &mut ExprPool, children: &[ExprId])
-    -> (Option<ExprId>, SmallVec<[ExprId; 8]>);
+    -> (Option<ExprId>, SmallVec<[ExprId; 32]>);
 ```
+
+The inline buffer is sized at 32 (96 bytes on 64-bit) rather than the more common 8.
+Rationale: human-written inputs fit comfortably in 8, but post-`expand` outputs commonly
+have 11+ children (e.g. `(x+1)^10` has 11 monomials), and §6.3's "1k-node post-expand"
+benchmark amplifies the heap-allocation cost across the whole DAG. A larger inline
+buffer is cheap stack memory in exchange for eliminating a hot-path allocation.
 
 Rules:
 
@@ -285,11 +406,18 @@ Rules:
   `pool.integer()` which selects `SmallInt` vs `BigInt` automatically.
 - **Rational + Rational / Integer + Rational → Rational** in lowest terms. The pool's
   `rational()` constructor enforces normalization (Invariant 3 in expression DAG §3.1).
-- **Float taint.** If any operand is a `Float`, the whole numeric partition collapses to
-  a float. This matches SCOPE.md §1.1's "the two are not silently mixed" rule — the
-  simplifier never *introduces* a float, but if the user wrote one, all numerics in the
-  same Add/Mul fold into the float. This is the only place float arithmetic appears in
-  the simplifier; symbolic rationals are otherwise the default representation.
+- **Float behaviour is mode-gated** (`SimplifierConfig::float_mode`):
+  - **`Symbolic` (default)** — floats are opaque atoms. The numeric folder partitions
+    children into integer-or-rational (folded together) and float (left alone). `2 + 3.0
+    + x` simplifies to `2 + 3.0 + x` (the integer/rational subset has only the lone `2`,
+    so nothing is folded and the float survives untouched). This matches REDUCE's
+    behaviour with `off rounded`
+    ([simp.red:347](../legacy/reduce-algebra-code-r7357-trunk/packages/alg/simp.red))
+    and honours SCOPE.md §1.1's "the two are not silently mixed" — neither direction.
+  - **`Numeric`** — opt-in mode mirroring REDUCE's `on rounded`. Any float child taints
+    the whole numeric partition: `2 + 3.0 + x → 5.0 + x`. Users who want this enable it
+    via `SimplifierConfig` on the `Session`. This is the only place float arithmetic
+    appears in the simplifier; symbolic rationals are otherwise the default representation.
 - **Identities from folding.** If folding produces `0` in an `Add`, it is omitted (the
   pool's `add()` already drops zero children, but we may finish with a singleton list and
   must return that single child rather than wrap it in a 1-ary `Add`). Likewise `1` in
@@ -372,10 +500,34 @@ DAG Invariant 1), the map collapses them automatically. **No structural comparis
 needed at bucket-insertion time** — this is the key payoff of hash-consing for the
 simplifier and the reason like-term collection is O(n) rather than O(n²).
 
-`Coeff` is `enum Coeff { Int(i64), Big(Box<BigInt>), Rat(Box<(BigInt, BigInt)>) }` — the
-same i64 fast-path / heap-fallback split that `ExprNode` uses for atoms. After bucketing,
-each (monomial, coeff) pair is re-encoded into an `ExprId` via the pool: zero coefficients
-are dropped, unit coefficients yield the bare monomial, otherwise `pool.mul([coeff, mon])`.
+`Coeff` mirrors the `ExprNode` atom split — `i64` fast path, BigInt fallback, single-box
+rational:
+
+```rust
+pub enum Coeff {
+    Int(i64),                 // fits-in-i64 fast path (the overwhelmingly common case)
+    Big(Box<BigInt>),         // overflow fallback
+    Rat(Box<Rational>),       // single allocation (Rational has two BigInts inline)
+}
+pub struct Rational { pub num: BigInt, pub den: BigInt }  // inline, normalized
+```
+
+`Rational` is a struct rather than `(BigInt, BigInt)` to avoid the two-box layout that
+the latter forces (`BigInt` itself heap-allocates). This is the same reasoning used by
+`ExprPool` for its rational atoms (DAG §3.4) and avoids one pointer-chase per coefficient
+on rational-heavy inputs.
+
+After bucketing, each (monomial, coeff) pair is re-encoded into an `ExprId` via the pool:
+zero coefficients are dropped, unit coefficients yield the bare monomial, otherwise
+`pool.mul([coeff, mon])`.
+
+**Hybrid linear/hashmap.** For `n ≤ 16` children the bucket is a `SmallVec<[(ExprId,
+Coeff); 16]>` with linear lookup; for larger `n` the implementation switches to
+`FxHashMap<ExprId, Coeff>`. Crossover analysis: for n=4 (the common Add child-count of
+human input), a 4-entry linear scan is ~16 ns; an FxHashMap insert is ~40 ns plus the
+cost of the per-call allocation. The hashmap wins around n=12-16 depending on hash
+quality. The hybrid avoids per-node allocation on the common case and matches the
+hashmap's asymptotic behaviour on the polynomial case.
 
 **Mul: like-base/exponent collection** is structurally analogous. Each factor is
 decomposed into `(base, exponent)`:
@@ -441,6 +593,22 @@ The "conservative: yes only when product is integer" cases (e.g. `(x^(1/2))^2 = 
 are sound because the resulting identity matches at every real `x` where the original
 expression is defined.
 
+**Known under-simplification vs. REDUCE.** This conservative table is a strict subset of
+what REDUCE's `simpexpt` does. In particular `(x^3)^(1/3) → x` is sound for any real `x`
+(odd integer powers preserve sign and the cube-root is real-single-valued), but the
+table rejects it because the product `3 * 1/3 = 1` is integer and the inner exponent is
+"integer" — but the rule only fires when both the inner and outer exponents are integers.
+A more aggressive Phase 2 rule could split on inner-exponent parity:
+
+- inner = odd integer, outer = any rational → sound (sign-preserving)
+- inner = even integer, outer = rational with even denominator → produces `|x|`, leave alone
+- inner = even integer, outer = integer → sound
+
+Phase 1 stays conservative both because the parity logic is more code than the rule
+deserves at this scope and because the absent rewrites are visually harmless (the user
+can always invoke `expand` or a future `radsimp`). The §6.5 golden-corpus may show
+divergence on cases like `(x^3)^(1/3)` — document, don't chase.
+
 ### 3.5 Rational expression simplification (`rational.rs`)
 
 `Div(p, q)` simplification is a thin orchestrator over the §1.5 univariate polynomial
@@ -502,17 +670,37 @@ variables, the simplifier returns the original `Div` unchanged. A diagnostic is 
 emitted — this is a feature limitation, not an error.
 
 **Division by zero detection.** If `den` simplifies to a recognized zero (`pool.is_zero`),
-`simplify_div` returns `KernelError::DivisionByZero`. Symbolic denominators that *might*
-be zero (e.g. `1 / (x - x)` after the inner simplification produces zero) trigger the same
-error. The error carries the original parse span when available (via the parser's
-`SpanMap`).
+`simplify_div` returns `KernelError::DivisionByZero` — *unless* the numerator also
+simplifies to zero, in which case `KernelError::IndeterminateForm` is returned. This
+matches REDUCE's distinction
+([simp.red:1611-1623](../legacy/reduce-algebra-code-r7357-trunk/packages/alg/simp.red))
+between `rerror(alg, 19, "0/0 formed")` and `rerror(alg, 20, "Zero divisor")` — the
+distinction matters in pedagogical contexts where `0/0` is conceptually different from
+`x/0`. Symbolic denominators that *might* be zero (e.g. `1 / (x - x)` after inner
+simplification produces zero) trigger `DivisionByZero`. The error carries the original
+parse span when available (via the parser's `SpanMap`).
+
+**Polynomial GCD is opt-in.** `SimplifierConfig::gcd` defaults to `false`. With it off
+(the default, matching REDUCE's `off gcd`), `Add` operations that would otherwise force
+a common-denominator polynomial GCD are skipped — the simplifier only cancels exact
+remainders here. This matches REDUCE
+([polrep.red:54-67](../legacy/reduce-algebra-code-r7357-trunk/packages/poly/polrep.red))
+where `!*gcd` defaults off because full multivariate GCD on every operation is the
+dominant cost of symbolic-heavy workloads. Users who want fully-reduced fractions enable
+`cfg.gcd = true` on the `Session`. The `simplify_div` path above runs polynomial division
+regardless, because the user has explicitly written a `Div` — the `gcd` switch only
+affects the *automatic* GCD reduction inside `addsq`/`multsq`-style operations on already-
+formed `Div` nodes.
 
 ### 3.6 Pattern matching (`patterns.rs`, `rules.rs`)
 
 The Phase 1 pattern matcher exists for one purpose: the Pythagorean identity
-`sin(u)^2 + cos(u)^2 → 1`. SCOPE.md §1.7 calls for it to fire even when the pair is
-embedded in a larger sum: `a + sin(u)^2 + b + cos(u)^2 → a + b + 1`. This requires
-matching across `Add` siblings, which is more than a simple top-down structural match.
+`sin(u)^2 + cos(u)^2 → 1` invoked via the **separate `simplify_trig` entry point**
+(see §1.1, §2.1). The default `simplify` does not apply trig identities — REDUCE's
+`simp` has the same discipline ([compact.rlg](../legacy/reduce-algebra-code-r7357-trunk/packages/misc/compact.rlg)).
+SCOPE.md §1.7 calls for it to fire even when the pair is embedded in a larger sum:
+`a + sin(u)^2 + b + cos(u)^2 → a + b + 1`. This requires matching across `Add` siblings,
+which is more than a simple top-down structural match.
 
 **Rule representation.**
 
@@ -616,7 +804,7 @@ Pythagorean rule entirely.
 bit-set lookup populated during like-term collection). If either is absent the rule is
 skipped — this keeps polynomial workloads fast.
 
-**Rule registration.**
+**Rule registration — two registries.**
 
 ```rust
 pub struct RuleRegistry {
@@ -625,22 +813,40 @@ pub struct RuleRegistry {
     mul_rules: Vec<Rule>,
 }
 
-impl Default for RuleRegistry {
-    fn default() -> Self {
-        Self {
-            pointwise: vec![],
-            add_rules: vec![pythagorean_rule()],
-            mul_rules: vec![],
-        }
+/// Rules used by the default `simplify` entry point. Empty in Phase 1 — the default
+/// simplifier is purely algebraic and does not apply trig identities.
+pub static DEFAULT_RULES: RuleRegistry = RuleRegistry {
+    pointwise: vec![],
+    add_rules: vec![],   // No Pythagorean here.
+    mul_rules: vec![],
+};
+
+/// Rules used by the `simplify_trig` entry point. Phase 1 ships only Pythagorean.
+/// Phase 2 §2.6 expands this with the rest of the trig identity family.
+pub fn trig_rules() -> RuleRegistry {
+    RuleRegistry {
+        pointwise: vec![],
+        add_rules: vec![pythagorean_rule()],
+        mul_rules: vec![],
     }
 }
 ```
 
-The registry is owned by the `Session` (Python-side, per SCOPE.md §1.3) and passed by
-reference into `simplify`. **In Phase 1, plugins can register read-only rules** at
-`Session` construction (per SCOPE.md §1.10's "register a rewrite rule that the simplifier
-will consider"). Phase 2 §2.6 generalizes this to a user-writable rule database with
-confluence checking.
+The registries are owned by the `Session` (Python-side, per SCOPE.md §1.3) and dispatched
+by entry point: `simplify` uses `DEFAULT_RULES`, `simplify_trig` uses `trig_rules()`
+composed with the default set. This split ensures REDUCE-compatibility on the most
+heavily-tested code path (the default `simplify`) while keeping the trig identity
+available behind an explicit user invocation, mirroring REDUCE's `compact()` discipline.
+
+**Plugin rules — Phase 2.** SCOPE.md §1.10 describes plugin-registered rules ("the
+simplifier will consider"). Phase 1 does **not** ship a plugin-rule registration API.
+Reasoning: confluence verification in §3.7 relies on the rule set being small and
+inspection-checkable; admitting plugin rules in Phase 1 would void that guarantee
+without giving us the Phase 2 confluence-analysis machinery to back it. The `Rule`/
+`Pattern`/`MatchEnv` contract is still designed in Phase 1 (so the API doesn't churn
+when plugins land), but the registration entry point is held until §2.6 ships its
+sandbox/termination check. The convergence cap (`MAX_ITERS = 3`) remains the universal
+backstop regardless.
 
 ### 3.7 Termination and confluence
 
@@ -674,35 +880,49 @@ deferred along with the engine itself.
 ```rust
 // In monomix-py/src/lib.rs
 #[pyfunction]
-fn simplify(py: Python<'_>, expr: &PyExpr) -> PyResult<PyExpr> {
-    let pool_handle = expr.pool.clone();          // Arc clone, cheap
-    let id          = expr.id;
-    let new_id = py.allow_threads(|| {            // GIL released
-        let mut pool = pool_handle.write();       // exclusive write lock for interning
-        monomix_kernel::simplify(&mut pool, id)
-    })?;
+fn simplify(py: Python<'_>, session: &PySession, expr: &PyExpr) -> PyResult<PyExpr> {
+    let pool_handle  = expr.pool.clone();          // Arc clone, cheap
+    let cfg_handle   = session.simplifier_cfg.clone();
+    let cache_handle = session.simplify_cache.clone();
+    let id           = expr.id;
+    let subtree_size = pool_handle.read().subtree_size(id);  // O(1), pool-cached
+    let new_id = if subtree_size > 500 {
+        py.allow_threads(|| {                      // GIL released
+            let mut pool  = pool_handle.write();
+            let mut cache = cache_handle.lock();
+            monomix_kernel::simplify(&mut pool, &cfg_handle, &mut cache, id)
+        })?
+    } else {
+        let mut pool  = pool_handle.write();
+        let mut cache = cache_handle.lock();
+        monomix_kernel::simplify(&mut pool, &cfg_handle, &mut cache, id)?
+    };
     Ok(PyExpr { pool: pool_handle, id: new_id })
 }
 ```
 
-The GIL is released for the duration of `simplify()`. The pool is held under a write lock
-because the simplifier interns new nodes; concurrent simplifies on the same pool serialize
-on the lock. Phase 2's read-phase / write-phase split (expression DAG §5.2) is the path to
+The GIL is released for the duration of `simplify()` when the input subtree is large
+enough to dominate the boundary overhead. The pool is held under a write lock because
+the simplifier interns new nodes; concurrent simplifies on the same pool serialize on
+the lock. Phase 2's read-phase / write-phase split (expression DAG §5.2) is the path to
 parallel simplification within a single request.
 
-For inputs smaller than a configurable threshold (default: 500 nodes — measured by a
-linear `pool.len()` comparison or a cheap pre-walk count), the GIL is *not* released
-because the Python-side overhead of `allow_threads` exceeds the work done. The threshold
-is tuned per the SCOPE.md §1.12 benchmark target (<500 ns boundary overhead per call).
+**Threshold metric.** `subtree_size(id)` measures *the input expression*, not the pool's
+total size. It is an O(1) field cached on each `ExprId` at intern time (the DAG design
+must add this — see action item §7). Using `pool.len()` was considered and rejected:
+after a long session, every call sees `pool.len() ≫ 500` and releases the GIL even for
+trivial inputs, regressing the SCOPE.md §1.12 boundary-overhead target (<500 ns) on the
+trivial path.
 
 ### 3.9 Error handling
 
 | Error | Source | Handling |
 |-------|--------|----------|
-| `DivisionByZero` | `Div(p, 0)` after simplification | Return `KernelError::DivisionByZero` with span if available |
+| `DivisionByZero` | `Div(p, 0)` after simplification, where `p ≠ 0` | Return `KernelError::DivisionByZero` with span if available |
+| `IndeterminateForm` | `Div(0, 0)` after simplification | Return `KernelError::IndeterminateForm` — distinct from `DivisionByZero` to match REDUCE's `0/0 formed` (alg 19) vs. `Zero divisor` (alg 20) |
 | `Overflow` | `BigInt` arithmetic exhausting memory | Propagate `KernelError::Overflow` (very rare; only on truly enormous coefficients) |
 | `NumericNaN` | Float arithmetic produces NaN | Preserve the NaN in the result; do not raise (NaN is a valid float value) |
-| `RuleEvalError` | A plugin rule's `rewrite` fn returns Err | Propagate; the offending rule is named in the error |
+| `RuleEvalError` | A built-in rule's `rewrite` fn returns Err | Propagate; the offending rule is named in the error. (Plugin rules deferred to Phase 2 — see §3.6.) |
 
 The simplifier never panics. Internal invariant violations (e.g. a like-term bucket out of
 sync) are caught by `debug_assert!` in debug builds and become benign no-ops in release
@@ -805,6 +1025,60 @@ By Phase 2 the contract is documented and tested; adding rules is purely additiv
 
 The cost is the ~150 lines of `patterns.rs` and the `Rule` struct, which is offset by
 removing the temptation to inline more rules ad-hoc as the rule set grows.
+
+### 4.6 Architectural divergence from REDUCE — DAG passes vs. canonical SQ form
+
+This design's relationship to original REDUCE deserves to be named explicitly so that
+golden-corpus reviewers (§6.5) and future maintainers understand the structural choice.
+
+**REDUCE's model.** REDUCE's `simp` does not produce an annotated tree; it produces a
+**standard quotient** (SQ): `numerator/denominator` where each is a sparse recursive
+multivariate polynomial in canonical normal form
+([polrep.red:45-68](../legacy/reduce-algebra-code-r7357-trunk/packages/poly/polrep.red)).
+"Simplification" is constructive — `addsq`, `multsq`, `simpexpt`, `simprad`, `simpiden`
+each produce a fully canonical SQ from canonical SQ inputs. There is no "rewrite pass";
+the data structure forbids non-canonical states. Idempotence and confluence are trivial
+because the form is canonical.
+
+**This design's model.** A general expression DAG (`ExprNode` variants) with a simplifier
+that runs bottom-up rewrite passes. Like-term collection, power consolidation, and
+common-factor cancellation are all *passes*, not invariants of the data structure.
+
+**Implications:**
+
+| Feature | REDUCE (SQ-form) | This design (DAG + passes) |
+|---|---|---|
+| Like-term collection | Implicit in `addf` recursion | Explicit pass (§3.3) |
+| Power consolidation | Implicit in `multf` mvar branch | Explicit pass (§3.4) |
+| Common-factor cancellation | Implicit in `addsq`/`multsq` GCD | Explicit pass (§3.5) |
+| Idempotence | Trivial (form is canonical) | Property test (§6.2) |
+| Confluence | Trivial (constructive) | Inspection-verified (§3.7) |
+| Original tree preservation | Lost (only SQ retained) | Preserved (DAG keeps both) |
+| Custom display forms | Re-derived from SQ each time | Free — walk the DAG |
+| Sub-expression sharing | Re-discovered per operation | Hash-cons gives O(1) sharing |
+| Mixed exact/symbolic ops | Forced through SQ recursion | Local — only the relevant subtree is touched |
+
+**Why the DAG model is the right choice for a modern CAS** (despite the work this design
+re-does relative to REDUCE):
+
+1. **Structure-preserving rewriting.** The user's `(a+b)^2` stays as `(a+b)^2` until they
+   ask for `expand`; in REDUCE, `(a+b)^2` is *immediately* `a^2 + 2ab + b^2` if
+   `expandexpt` is on (the default). Modern CAS users expect structure preservation.
+2. **Hash-cons sharing across operations.** Differentiating `(big_subexpr)^2` and
+   simplifying the result reuses `big_subexpr` by `ExprId`; in REDUCE the subexpression
+   would be re-canonicalized through SQ on every operation.
+3. **Plugin-friendly.** Phase 2 §2.6's general rule database needs a tree to match against;
+   the SQ form is a wrong shape for surface-syntactic rewrite rules.
+
+**Implications for testing.** The §6.5 golden-corpus must accept that REDUCE's canonical
+output is one form among many that are equally "correct"; the test harness records
+intentional divergences (e.g. `(a+b)^2` not auto-expanded, `sin^2 + cos^2` not auto-collapsed)
+in a manifest with `# reason: ...` annotations rather than treating them as failures.
+
+**Revisit trigger.** If golden-corpus divergence becomes unmanageable (more than ~30%
+of canonical outputs differ from REDUCE), reconsider — either implement a `simp_to_sq`
+canonicalizer that produces SQ-form output for compatibility testing, or invest in the
+divergence manifest infrastructure rather than chasing line-by-line parity.
 
 ---
 
@@ -911,12 +1185,23 @@ fractions) call the dedicated routines (`expand`, `factor` in Phase 2, etc.).
 - `simplify(1 / 0)` → `KernelError::DivisionByZero`
 - `simplify(x / (y - y))` → `KernelError::DivisionByZero` (after inner simplification reveals zero)
 
-**Pythagorean:**
-- `simplify(sin(x)^2 + cos(x)^2) == 1`
-- `simplify(a + sin(x)^2 + b + cos(x)^2) == a + b + 1`
-- `simplify(sin(2*y)^2 + cos(2*y)^2) == 1`
-- `simplify(sin(x)^2 + cos(y)^2)` left unchanged (different arguments)
-- `simplify(sin(x)^3 + cos(x)^2)` left unchanged (wrong exponent on sin)
+**Pythagorean (only via `simplify_trig`, NOT via default `simplify`):**
+- `simplify(sin(x)^2 + cos(x)^2)` ⇒ unchanged (REDUCE-compatibility — see §1.1, §4.6)
+- `simplify_trig(sin(x)^2 + cos(x)^2) == 1`
+- `simplify_trig(a + sin(x)^2 + b + cos(x)^2) == a + b + 1`
+- `simplify_trig(sin(2*y)^2 + cos(2*y)^2) == 1`
+- `simplify_trig(sin(x)^2 + cos(y)^2)` left unchanged (different arguments)
+- `simplify_trig(sin(x)^3 + cos(x)^2)` left unchanged (wrong exponent on sin)
+
+**Float mode (`SimplifierConfig::float_mode`):**
+- With `Symbolic` (default): `simplify(2 + 3.0 + x) == 2 + 3.0 + x` (untouched)
+- With `Numeric`: `simplify(2 + 3.0 + x) == 5.0 + x`
+- With `Symbolic`: `simplify(2 + 3) == 5` still folds (integer/integer is unaffected by mode)
+
+**Division errors:**
+- `simplify(1 / 0)` → `KernelError::DivisionByZero`
+- `simplify(0 / 0)` → `KernelError::IndeterminateForm`
+- `simplify(x / (y - y))` → `KernelError::DivisionByZero` (after inner simplification reveals zero den)
 
 **Idempotence regression:**
 - For each test above, `simplify(simplify(input)) == simplify(input)`.
@@ -932,11 +1217,21 @@ fractions) call the dedicated routines (`expand`, `factor` in Phase 2, etc.).
 - **No ExprId growth on already-simplified input.** For random `e`, the arena size before
   and after `simplify(simplify(e))` differs by at most a small constant (cache shouldn't
   re-intern).
-- **Termination.** `simplify` always returns within the `MAX_ITERS` cap. Asserted via a
-  pass counter in debug builds.
+- **Termination — tightened bound.** `simplify` always returns with
+  `cache.last_pass_count ≤ 2` for the Phase 1 default rule set. Asserting `≤ 2` (not
+  `≤ MAX_ITERS = 3`) catches silent regressions where a rule change increases iteration
+  count up to but not beyond the cap. Failures here mean the rule set has grown past
+  what's been confluence-analyzed.
+- **`simplify_trig` termination.** `simplify_trig` always returns with
+  `cache.last_pass_count ≤ 3` (the Pythagorean rule plus default rules can interact in
+  one extra pass to fold the resulting `1` into siblings).
 - **Pythagorean specifically.** Generate an expression of the form
-  `Sum + sin(u)^2 + cos(u)^2` where `Sum` is arbitrary; assert the output equals
-  `simplify(Sum) + 1`.
+  `Sum + sin(u)^2 + cos(u)^2` where `Sum` is arbitrary; assert
+  `simplify_trig(...)` equals `simplify(Sum) + 1`. (Note: the default `simplify` does
+  NOT collapse the pair — `simplify(Sum + sin(u)^2 + cos(u)^2)` retains the trig terms.)
+- **Float mode determinism.** For random `e` containing floats, `simplify(e)` with
+  `float_mode = Symbolic` never introduces or removes float literals; with `Numeric`,
+  the count of float literals never increases.
 
 ### 6.3 Benchmarks (`criterion`)
 
@@ -965,12 +1260,27 @@ should be near-free. If it regresses, the cache or the bottom-up dedup is broken
 
 A subset of `legacy/reduce-algebra-code-r7357-trunk/packages/*/{*.tst,*.rlg}` that
 exercises Phase 1 simplification (per SCOPE.md §0.7 layer (d)). For each `.tst` input,
-parse, simplify, and compare against the corresponding `.rlg` output. Mismatches are
-investigated case-by-case — REDUCE may have made different choices about canonical form
-that we elect to match exactly, deviate from, or document as an intentional difference.
+parse, simplify, and compare against the corresponding `.rlg` output.
 
-The curated set lives in `tests/golden/simplify/` with a manifest mapping input file to
-expected output and a `# reason: ...` annotation when our output deviates.
+**Known intentional divergences from REDUCE** (recorded in the manifest with
+`# reason: ...` annotations, not treated as failures):
+
+- `(a+b)^2` not auto-expanded to `a^2 + 2ab + b^2` — REDUCE's `expandexpt` is on by
+  default; ours is off (see §1.4).
+- `sin(x)^2 + cos(x)^2` not auto-collapsed to `1` — REDUCE's `simp` does not collapse
+  this either ([compact.rlg:7-11](../legacy/reduce-algebra-code-r7357-trunk/packages/misc/compact.rlg)),
+  but tests written for `compact()` will. Use the `simplify_trig` entry point to match.
+- `1/x + 1/y` not combined to `(y+x)/(xy)` — REDUCE's `mcd` is on by default; ours is
+  off (see §1.4).
+- `(x^3)^(1/3)` not reduced to `x` — Phase 1's conservative power-consolidation rule
+  rejects rational outer exponents (see §3.4).
+- Numeric folding when floats are present — REDUCE folds with `on rounded`; ours
+  requires `cfg.float_mode = Numeric` (see §3.2).
+
+The curated set lives in `tests/golden/simplify/` with the manifest mapping input file
+to expected output and the `# reason: ...` annotation per case. The manifest is the
+contract; if golden-corpus divergence becomes unmanageable (>30% of canonical outputs
+differ), reconsider per §4.6's revisit trigger.
 
 ---
 
@@ -979,45 +1289,67 @@ expected output and a `# reason: ...` annotation when our output deviates.
 ### Phase 1 — Core implementation
 
 1. [ ] Create `crates/monomix-kernel/src/simplify/mod.rs` exposing `simplify` and
-       `simplify_with_cache`; wire into `KernelError`
-2. [ ] Implement `driver.rs` — bottom-up traversal via `map_bottom_up`, fixed-point loop
-       with `MAX_ITERS = 3`, debug assertion on convergence (§3.1)
-3. [ ] Implement `numeric.rs` — `BigInt`/`Rational` exact arithmetic with `i64` fast path,
-       float-taint behaviour (§3.2)
-4. [ ] Implement `like_terms.rs` — `(coefficient, monomial)` decomposition, `FxHashMap`
-       bucketing, re-emission via pool constructors (§3.3)
-5. [ ] Implement `powers.rs` — `(x^a)^b → x^(a*b)` with the integer/rational guard table
-       (§3.4)
-6. [ ] Implement `rational.rs` — orchestration over the §1.5 polynomial division engine;
-       no-cancellation fallback when remainder is non-zero (§3.5)
-7. [ ] Implement `patterns.rs` — `Pattern`, `MetaVar`, `MatchEnv`, `Rule`, `RuleKind`,
+       `simplify_trig` entry points (§2.1); wire into `KernelError` with
+       `IndeterminateForm` distinct from `DivisionByZero` (§3.9)
+2. [ ] Define `SimplifierConfig` (`float_mode`, `gcd`, `expand_powers`,
+       `make_common_denominator`) and `SimplifyCache` (with `evict_if_full`,
+       `last_pass_count`); document defaults match §1.4
+3. [ ] Implement `driver.rs` — bottom-up traversal via `map_bottom_up`, fixed-point loop
+       with `MAX_ITERS = 3`, debug pass-counter exposure (§3.1)
+4. [ ] Implement `numeric.rs` — `BigInt`/`Rational` exact arithmetic with `i64` fast path;
+       `Symbolic` mode (default, no float taint) and `Numeric` mode (taint, opt-in) (§3.2)
+5. [ ] Implement `like_terms.rs` — `(coefficient, monomial)` decomposition, hybrid
+       linear/hashmap bucketing (linear ≤16, hashmap >16), single-allocation `Rational`
+       struct in `Coeff`, `SmallVec` inline-32 buffers (§3.3)
+6. [ ] Implement `powers.rs` — `(x^a)^b → x^(a*b)` with the conservative integer/rational
+       guard table; document under-simplification vs. REDUCE (§3.4)
+7. [ ] Implement `rational.rs` — orchestration over the §1.5 polynomial division engine;
+       gate automatic GCD reduction behind `cfg.gcd`; raise `IndeterminateForm` on `0/0`
+       (§3.5, §3.9)
+8. [ ] Implement `patterns.rs` — `Pattern`, `MetaVar`, `MatchEnv`, `Rule`, `RuleKind`,
        `RuleRegistry` (§3.6)
-8. [ ] Implement `rules.rs` — Pythagorean rule as the sole built-in; pre-scan via
-       like-term bucket function-tag bitset (§3.6)
-9. [ ] Wire `RuleRegistry` ownership into the Python `Session` (per SCOPE.md §1.10)
-10. [ ] Implement PyO3 boundary — GIL release for >500-node inputs, write-lock the pool
-        (§3.8)
+9. [ ] Implement `rules.rs` — Pythagorean rule registered into `trig_rules()` only;
+       `DEFAULT_RULES` is empty; pre-scan via like-term bucket function-tag bitset (§3.6)
+10. [ ] Wire `SimplifierConfig` and session-scoped `SimplifyCache` (capped at 100k,
+        full-clear eviction) into the Python `Session` (per SCOPE.md §1.3, §1.10)
+11. [ ] Add `pool.subtree_size(id)` (O(1), cached at intern time) — coordinate with the
+        DAG design action items
+12. [ ] Implement PyO3 boundary — GIL release threshold based on `subtree_size > 500`
+        (NOT `pool.len()`); write-lock the pool, mutex-guard the cache (§3.8)
+13. [ ] Defer plugin-rule registration API entirely to Phase 2 (§3.6 — no plugin entry
+        point in Phase 1, contract designed but not exposed)
 
 ### Phase 1 — Verification
 
-11. [ ] Unit-test all transformations enumerated in §6.1
-12. [ ] `proptest` idempotence + numerical-agreement suite (§6.2)
-13. [ ] `criterion` benchmarks including the "already-canonical" no-op regression guard
+14. [ ] Unit-test all transformations enumerated in §6.1, including the explicit
+        Pythagorean-not-collapsed-by-default cases and float-mode behaviour
+15. [ ] `proptest` idempotence + numerical-agreement suite (§6.2); termination test
+        asserts `pass_count ≤ 2` (tightened from `MAX_ITERS = 3`)
+16. [ ] `criterion` benchmarks including the "already-canonical" no-op regression guard
         (§6.3)
-14. [ ] `cargo-fuzz` target with idempotence + termination + arena-bound assertions (§6.4)
-15. [ ] Curate the golden-corpus `.tst`/`.rlg` subset for simplification (§6.5)
-16. [ ] Confirm SCOPE.md §1.12 invariants hold: `simplify` idempotence, `expand` ∘
+17. [ ] `cargo-fuzz` target with idempotence + termination + arena-bound assertions (§6.4)
+18. [ ] Curate the golden-corpus `.tst`/`.rlg` subset for simplification, with a
+        divergence manifest covering the five known intentional divergences in §6.5
+19. [ ] Confirm SCOPE.md §1.12 invariants hold: `simplify` idempotence, `expand` ∘
         `simplify` round-trip, `df` linearity (the last cross-checked once `df` lands)
 
 ### Phase 2 — Generalization (deferred)
 
-17. [ ] Generalize `Pattern` and `MatchEnv` to support user-defined rules from REDUCE
+20. [ ] Honour `cfg.expand_powers` and `cfg.make_common_denominator` (currently struct
+        fields with no behaviour) — Phase 2 gives the user REDUCE-default-equivalent
+        behaviour as opt-in
+21. [ ] Implement `rationalize` switch and `combinelogs` switch analogs
+22. [ ] Generalize `Pattern` and `MatchEnv` to support user-defined rules from REDUCE
         `let`-syntax and Python plugin builders (SCOPE.md §2.6)
-18. [ ] Add confluence analysis or a deterministic application order for the rule
+23. [ ] Expose plugin-rule registration API on `Session` with a per-rule termination
+        sandbox (§3.6 — Phase 1 deliberately omits this)
+24. [ ] Add confluence analysis or a deterministic application order for the rule
         database (§5.1)
-19. [ ] Implement read-phase / write-phase split for parallel within-request
+25. [ ] Refine `(x^a)^b` consolidation to handle odd-integer-inner cases (e.g.
+        `(x^3)^(1/3) → x`) per §3.4's parity-aware table
+26. [ ] Implement read-phase / write-phase split for parallel within-request
         simplification (§5.2; shared with expression DAG §5.2)
-20. [ ] Migrate to content-addressed `ExprId` and add an MCP-side simplification cache
+27. [ ] Migrate to content-addressed `ExprId` and add an MCP-side simplification cache
         (§5.3, expression DAG §5.4)
-21. [ ] Add `simplify_advanced` entry point with conditional rules and trig-identity
+28. [ ] Add `simplify_advanced` entry point with conditional rules and trig-identity
         suite beyond Pythagorean (SCOPE.md §2.6)
