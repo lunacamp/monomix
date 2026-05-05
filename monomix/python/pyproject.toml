@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monomix"
+version = "0.0.1"
+description = "Modern CAS rewrite of REDUCE — Python facade and SMT bridge"
+requires-python = ">=3.10"
+authors = [{ name = "Roman" }]
+license = { text = "BSD-2-Clause" }
+
+dependencies = []
+
+[project.optional-dependencies]
+smt = ["z3-solver>=4.13"]
+dev = [
+  "z3-solver>=4.13",
+  "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["monomix*"]
