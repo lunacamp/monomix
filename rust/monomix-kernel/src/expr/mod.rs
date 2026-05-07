@@ -70,6 +70,10 @@ const _EXPR_NODE_SIZE_GUARD: () = assert!(
 // ---- Arena -----------------------------------------------------------------
 
 struct ArenaEntry {
+    /// Cached content hash. Currently unused at runtime — the dedup map
+    /// already keys by hash — but kept for incremental rehash passes
+    /// (e.g., pool serialization / merge).
+    #[allow(dead_code)]
     hash: u64,
     node: ExprNode,
     subtree_size: u32,
@@ -186,7 +190,8 @@ impl ExprPool {
     }
 
     /// Test helper: locates a pre-interned SmallInt without &mut self.
-    pub fn small_int_check(&self, n: i64) -> ExprId {
+    #[allow(dead_code)]
+    pub(crate) fn small_int_check(&self, n: i64) -> ExprId {
         let h = Self::content_hash(&ExprNode::SmallInt(n));
         if let Some(candidates) = self.dedup.get(&h) {
             for &id in candidates.iter() {
@@ -289,6 +294,12 @@ impl ExprPool {
 impl Default for ExprPool {
     fn default() -> Self { Self::new() }
 }
+
+// Compile-time guarantee that ExprPool stays Send + Sync (kernel constraint).
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ExprPool>();
+};
 
 #[cfg(test)]
 mod tests {
