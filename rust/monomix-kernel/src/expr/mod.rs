@@ -437,6 +437,13 @@ impl ExprPool {
         f(acc, id, &self.nodes[id.0 as usize].node)
     }
 
+    /// Rebuild `root` bottom-up by recursively mapping each node through
+    /// the normalizing constructors, calling `f` on each rebuilt node.
+    ///
+    /// The `cache` is **`f`-specific**: it maps `original_root → post-f result`.
+    /// Reusing the same cache across two different `f` callbacks will return
+    /// stale (wrong) results. Use `map_bottom_up_fresh` if you don't need to
+    /// reuse the allocation across calls of the same `f`.
     pub fn map_bottom_up(
         &mut self,
         root: ExprId,
