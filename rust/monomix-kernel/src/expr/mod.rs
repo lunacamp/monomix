@@ -388,6 +388,116 @@ impl ExprPool {
     }
 
     pub fn len(&self) -> usize { self.nodes.len() }
+
+    // --- Traversal helpers --------------------------------------------------
+
+    pub fn contains_symbol(&self, expr: ExprId, sym: ExprId) -> bool {
+        self.fold(expr, false, &mut |found, id, _node| found || id == sym)
+    }
+
+    pub fn fold<A>(
+        &self,
+        root: ExprId,
+        init: A,
+        f: &mut dyn FnMut(A, ExprId, &ExprNode) -> A,
+    ) -> A {
+        let mut visited = rustc_hash::FxHashSet::default();
+        self.fold_impl(root, init, f, &mut visited)
+    }
+
+    fn fold_impl<A>(
+        &self,
+        id: ExprId,
+        acc: A,
+        f: &mut dyn FnMut(A, ExprId, &ExprNode) -> A,
+        visited: &mut rustc_hash::FxHashSet<ExprId>,
+    ) -> A {
+        if !visited.insert(id) {
+            return acc;
+        }
+        let node = &self.nodes[id.0 as usize].node;
+        // Visit children first (bottom-up)
+        let acc = match node {
+            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c) => {
+                let ids: Vec<ExprId> = c.to_vec();
+                ids.iter().fold(acc, |a, &child| self.fold_impl(child, a, f, visited))
+            }
+            ExprNode::Fn(_, c) => {
+                let ids: Vec<ExprId> = c.to_vec();
+                ids.iter().fold(acc, |a, &child| self.fold_impl(child, a, f, visited))
+            }
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b) => {
+                let (a, b) = (*a, *b);
+                let acc = self.fold_impl(a, acc, f, visited);
+                self.fold_impl(b, acc, f, visited)
+            }
+            ExprNode::Neg(x) => { let x = *x; self.fold_impl(x, acc, f, visited) }
+            _ => acc,
+        };
+        f(acc, id, &self.nodes[id.0 as usize].node)
+    }
+
+    pub fn map_bottom_up(
+        &mut self,
+        root: ExprId,
+        cache: &mut FxHashMap<ExprId, ExprId>,
+        f: &mut dyn FnMut(&mut ExprPool, ExprId) -> ExprId,
+    ) -> ExprId {
+        if let Some(&cached) = cache.get(&root) {
+            return cached;
+        }
+        let node = self.nodes[root.0 as usize].node.clone();
+        let mapped_node = match node {
+            ExprNode::Add(c) => {
+                let ids: Vec<ExprId> = c.iter().map(|&child| self.map_bottom_up(child, cache, f)).collect();
+                self.add(ids)
+            }
+            ExprNode::Mul(c) => {
+                let ids: Vec<ExprId> = c.iter().map(|&child| self.map_bottom_up(child, cache, f)).collect();
+                self.mul(ids)
+            }
+            ExprNode::Pow(a, b) => {
+                let a2 = self.map_bottom_up(a, cache, f);
+                let b2 = self.map_bottom_up(b, cache, f);
+                self.pow(a2, b2)
+            }
+            ExprNode::Neg(x) => {
+                let x2 = self.map_bottom_up(x, cache, f);
+                self.neg(x2)
+            }
+            ExprNode::Div(a, b) => {
+                let a2 = self.map_bottom_up(a, cache, f);
+                let b2 = self.map_bottom_up(b, cache, f);
+                self.div(a2, b2)
+            }
+            ExprNode::Eq(a, b) => {
+                let a2 = self.map_bottom_up(a, cache, f);
+                let b2 = self.map_bottom_up(b, cache, f);
+                self.eq_node(a2, b2)
+            }
+            ExprNode::Fn(tag, c) => {
+                let ids: Vec<ExprId> = c.iter().map(|&child| self.map_bottom_up(child, cache, f)).collect();
+                self.func(tag, ids)
+            }
+            ExprNode::List(c) => {
+                let ids: Vec<ExprId> = c.iter().map(|&child| self.map_bottom_up(child, cache, f)).collect();
+                self.list(ids)
+            }
+            _ => root, // atoms map to themselves
+        };
+        let result = f(self, mapped_node);
+        cache.insert(root, result);
+        result
+    }
+
+    pub fn map_bottom_up_fresh(
+        &mut self,
+        root: ExprId,
+        f: &mut dyn FnMut(&mut ExprPool, ExprId) -> ExprId,
+    ) -> ExprId {
+        let mut cache = FxHashMap::default();
+        self.map_bottom_up(root, &mut cache, f)
+    }
 }
 
 impl Default for ExprPool {
@@ -503,5 +613,42 @@ mod tests {
         let x = pool.symbol("x");
         let one = pool.one;
         assert_eq!(pool.div(x, one), x);
+    }
+
+    #[test]
+    fn contains_symbol_finds_nested() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let xy = pool.mul(vec![x, y]);
+        let one = pool.small_int(1);
+        let expr = pool.add(vec![xy, one]);
+        assert!(pool.contains_symbol(expr, x));
+        assert!(pool.contains_symbol(expr, y));
+        let z = pool.symbol("z");
+        assert!(!pool.contains_symbol(expr, z));
+    }
+
+    #[test]
+    fn fold_sums_all_small_ints() {
+        let mut pool = ExprPool::new();
+        let a = pool.small_int(3);
+        let b = pool.small_int(4);
+        let expr = pool.add(vec![a, b]);
+        let sum = pool.fold(expr, 0i64, &mut |acc, _id, node| match node {
+            ExprNode::SmallInt(n) => acc + n,
+            _ => acc,
+        });
+        assert_eq!(sum, 7);
+    }
+
+    #[test]
+    fn map_bottom_up_identity() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let one = pool.small_int(1);
+        let expr = pool.add(vec![x, one]);
+        let result = pool.map_bottom_up_fresh(expr, &mut |_pool, id| id);
+        assert_eq!(result, expr);
     }
 }
