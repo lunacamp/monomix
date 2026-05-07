@@ -1,4 +1,12 @@
 legacy/
 
-__pycache__
-.pytest_cache
+# Python
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Rust
+target/

@@ -1,6 +1,6 @@
 """Z3 backend behind the public solver facade.
 
-Exposes the four verbs documented in ADR-0001:
+Exposes the four verbs documented in ADR-0003:
 
     assume(constraints) -> SolverContext   (incremental, push/pop)
     prove(theorem, assumptions=...)        -> Proved | Refuted | Unknown

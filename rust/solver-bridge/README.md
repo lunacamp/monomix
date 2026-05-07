@@ -6,7 +6,8 @@ is mechanical when the Rust kernel is ready.
 
 When activated:
 
-1. Add the workspace root to `monomix/rust/Cargo.toml` (currently absent).
+1. The crate is already a member of the root Cargo workspace
+   (see `../../Cargo.toml`); nothing to do here.
 2. Uncomment the `z3` dependency in this crate's `Cargo.toml`. Building
    `z3-sys` requires the Z3 C library; on Windows the cleanest path is
    `vcpkg install z3` and `cargo build` with `Z3_SYS_Z3_HEADER` pointing

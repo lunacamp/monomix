@@ -1,8 +1,9 @@
-# ADR 0001 — Z3 as the SMT backend for Monomix
+# ADR 0003 — Z3 as the SMT backend for Monomix
 
 - Status: Accepted
 - Date: 2026-05-03
 - Deciders: Roman (solo maintainer)
+- Depends on: ADR-0001 (implementation language), ADR-0002 (high-level architecture)
 
 ## Context
 
