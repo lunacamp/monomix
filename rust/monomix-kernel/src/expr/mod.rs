@@ -248,6 +248,95 @@ impl ExprPool {
         self.intern(ExprNode::String(id))
     }
 
+    // --- Composite constructors (normalizing) -------------------------------
+
+    pub fn add(&mut self, children: Vec<ExprId>) -> ExprId {
+        // Flatten nested Add nodes
+        let mut flat: Vec<ExprId> = Vec::with_capacity(children.len());
+        for c in children {
+            if let ExprNode::Add(inner) = self.get(c).clone() {
+                flat.extend_from_slice(&inner);
+            } else {
+                flat.push(c);
+            }
+        }
+        // Remove zeros
+        flat.retain(|&c| !self.is_zero(c));
+        if flat.is_empty() {
+            return self.zero;
+        }
+        if flat.len() == 1 {
+            return flat[0];
+        }
+        // Sort for canonical form (commutativity)
+        flat.sort_unstable();
+        self.intern(ExprNode::Add(flat.into_boxed_slice()))
+    }
+
+    pub fn mul(&mut self, children: Vec<ExprId>) -> ExprId {
+        // Flatten nested Mul nodes
+        let mut flat: Vec<ExprId> = Vec::with_capacity(children.len());
+        for c in children {
+            if let ExprNode::Mul(inner) = self.get(c).clone() {
+                flat.extend_from_slice(&inner);
+            } else {
+                flat.push(c);
+            }
+        }
+        // Short-circuit on zero
+        if flat.iter().any(|&c| self.is_zero(c)) {
+            return self.zero;
+        }
+        // Remove ones
+        flat.retain(|&c| !self.is_one(c));
+        if flat.is_empty() {
+            return self.one;
+        }
+        if flat.len() == 1 {
+            return flat[0];
+        }
+        flat.sort_unstable();
+        self.intern(ExprNode::Mul(flat.into_boxed_slice()))
+    }
+
+    pub fn pow(&mut self, base: ExprId, exp: ExprId) -> ExprId {
+        if self.is_zero(exp) { return self.one; }
+        if self.is_one(exp)  { return base; }
+        self.intern(ExprNode::Pow(base, exp))
+    }
+
+    pub fn neg(&mut self, x: ExprId) -> ExprId {
+        if let ExprNode::Neg(inner) = *self.get(x) {
+            return inner; // neg(neg(x)) → x
+        }
+        if self.is_zero(x) {
+            return self.zero;
+        }
+        self.intern(ExprNode::Neg(x))
+    }
+
+    pub fn div(&mut self, num: ExprId, den: ExprId) -> ExprId {
+        if self.is_one(den) { return num; }
+        self.intern(ExprNode::Div(num, den))
+    }
+
+    pub fn eq_node(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Eq(lhs, rhs))
+    }
+
+    pub fn func(&mut self, tag: FnTag, args: Vec<ExprId>) -> ExprId {
+        self.intern(ExprNode::Fn(tag, args.into_boxed_slice()))
+    }
+
+    pub fn func_named(&mut self, name: &str, args: Vec<ExprId>) -> ExprId {
+        let s = self.intern_str(name);
+        self.func(FnTag::Custom(s), args)
+    }
+
+    pub fn list(&mut self, items: Vec<ExprId>) -> ExprId {
+        self.intern(ExprNode::List(items.into_boxed_slice()))
+    }
+
     // --- Access -------------------------------------------------------------
 
     pub fn get(&self, id: ExprId) -> &ExprNode {
@@ -355,5 +444,54 @@ mod tests {
         let r1 = pool.rational(BigInt::from(4), BigInt::from(6));
         let r2 = pool.rational(BigInt::from(2), BigInt::from(3));
         assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn add_flattens_and_sorts() {
+        let mut pool = ExprPool::new();
+        let a = pool.symbol("a");
+        let b = pool.symbol("b");
+        let c = pool.symbol("c");
+        let ab = pool.add(vec![a, b]);
+        let ab_c = pool.add(vec![ab, c]);
+        let bc = pool.add(vec![b, c]);
+        let a_bc = pool.add(vec![a, bc]);
+        assert_eq!(ab_c, a_bc, "add should flatten and produce same node");
+    }
+
+    #[test]
+    fn add_commutativity() {
+        let mut pool = ExprPool::new();
+        let a = pool.symbol("a");
+        let b = pool.symbol("b");
+        let ab = pool.add(vec![a, b]);
+        let ba = pool.add(vec![b, a]);
+        assert_eq!(ab, ba);
+    }
+
+    #[test]
+    fn neg_double_negation() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let neg_x = pool.neg(x);
+        assert_eq!(pool.neg(neg_x), x);
+    }
+
+    #[test]
+    fn pow_identity_rules() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let zero = pool.zero;
+        let one = pool.one;
+        assert_eq!(pool.pow(x, zero), one);
+        assert_eq!(pool.pow(x, one), x);
+    }
+
+    #[test]
+    fn div_by_one() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let one = pool.one;
+        assert_eq!(pool.div(x, one), x);
     }
 }
