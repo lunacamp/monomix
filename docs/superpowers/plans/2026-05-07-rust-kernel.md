@@ -68,12 +68,84 @@
 
 ---
 
-### Task 1: Workspace registration
+### Task 1: Crate scaffold + workspace registration
+
+This combines workspace edit and crate creation into one task so the workspace
+is never in a broken state during a commit.
 
 **Files:**
 - Modify: `Cargo.toml`
+- Create: `rust/monomix-kernel/Cargo.toml`
+- Create: `rust/monomix-kernel/src/lib.rs`
+- Create: `rust/monomix-kernel/src/error.rs` (stub)
+- Create: `rust/monomix-kernel/src/expr/mod.rs` (stub)
+- Create: `rust/monomix-kernel/src/parser/mod.rs` (stub)
+- Create: `rust/monomix-kernel/src/poly/mod.rs` (stub)
 
-- [ ] **Step 1: Add the new crate to the workspace members list**
+- [ ] **Step 1: Create the crate's Cargo.toml**
+
+```toml
+# rust/monomix-kernel/Cargo.toml
+[package]
+name        = "monomix-kernel"
+version     = "0.1.0"
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+
+[dependencies]
+num-bigint    = "0.4"
+num-integer   = "0.1"
+num-rational  = "0.4"
+num-traits    = "0.2"
+rustc-hash    = "1"
+indexmap      = "2"
+ordered-float = "4"
+arrayvec      = "0.7"
+smallvec      = { version = "1", features = ["union"] }
+thiserror     = "1"
+
+[dev-dependencies]
+proptest  = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+serde     = { version = "1", features = ["derive"] }
+toml      = "0.8"
+
+[[bench]]
+name    = "kernel"
+harness = false
+
+[lints]
+workspace = true
+```
+
+- [ ] **Step 2: Create stub `src/lib.rs` and module files**
+
+```rust
+// rust/monomix-kernel/src/lib.rs
+pub mod error;
+pub mod expr;
+pub mod parser;
+pub mod poly;
+```
+
+Create each module file with a single placeholder comment so the crate compiles:
+
+```rust
+// rust/monomix-kernel/src/error.rs
+// implementation in Task 3
+
+// rust/monomix-kernel/src/expr/mod.rs
+// implementation in Task 4+
+
+// rust/monomix-kernel/src/parser/mod.rs
+// implementation in Task 9+
+
+// rust/monomix-kernel/src/poly/mod.rs
+// implementation in Task 13+
+```
+
+- [ ] **Step 3: Add the crate to the workspace `members` list**
 
 ```toml
 # Cargo.toml — workspace root
@@ -90,95 +162,7 @@ authors = ["Roman Korneev"]
 unsafe_code = "forbid"
 ```
 
-- [ ] **Step 2: Verify the workspace sees the new member (crate doesn't exist yet, this is expected to fail with "No such file")**
-
-```
-cargo metadata --no-deps 2>&1 | head -5
-```
-
-Expected: error about missing `rust/monomix-kernel` — that's correct, the crate doesn't exist yet.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add Cargo.toml
-git commit -m "chore: register rust/monomix-kernel in workspace"
-```
-
----
-
-### Task 2: Crate scaffold
-
-**Files:**
-- Create: `rust/monomix-kernel/Cargo.toml`
-- Create: `rust/monomix-kernel/src/lib.rs`
-
-- [ ] **Step 1: Create Cargo.toml for the new crate**
-
-```toml
-# rust/monomix-kernel/Cargo.toml
-[package]
-name        = "monomix-kernel"
-version     = "0.1.0"
-edition.workspace    = true
-license.workspace    = true
-authors.workspace    = true
-
-[dependencies]
-num-bigint    = "0.4"
-num-rational  = "0.4"
-num-traits    = "0.2"
-rustc-hash    = "1"
-indexmap      = "2"
-ordered-float = "4"
-arrayvec      = "0.7"
-smallvec      = { version = "1", features = ["union"] }
-thiserror     = "1"
-
-[dev-dependencies]
-proptest   = "1"
-criterion  = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name    = "kernel"
-harness = false
-
-[lints]
-workspace = true
-```
-
-- [ ] **Step 2: Create minimal lib.rs**
-
-```rust
-// rust/monomix-kernel/src/lib.rs
-pub mod error;
-pub mod expr;
-pub mod parser;
-pub mod poly;
-```
-
-- [ ] **Step 3: Create stub modules so the crate compiles**
-
-```rust
-// rust/monomix-kernel/src/error.rs
-// (empty for now)
-
-// rust/monomix-kernel/src/expr/mod.rs
-// (empty for now)
-
-// rust/monomix-kernel/src/parser/mod.rs
-// (empty for now)
-
-// rust/monomix-kernel/src/poly/mod.rs
-// (empty for now)
-```
-
-Create the stub files (each containing just a comment):
-- `rust/monomix-kernel/src/expr/mod.rs`
-- `rust/monomix-kernel/src/parser/mod.rs`
-- `rust/monomix-kernel/src/poly/mod.rs`
-
-- [ ] **Step 4: Verify the workspace compiles**
+- [ ] **Step 4: Verify the whole workspace compiles**
 
 ```
 cargo build -p monomix-kernel
@@ -189,9 +173,15 @@ Expected: compiles with zero errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add rust/monomix-kernel/
-git commit -m "feat: add monomix-kernel crate scaffold"
+git add Cargo.toml rust/monomix-kernel/
+git commit -m "feat: add monomix-kernel crate scaffold and register in workspace"
 ```
+
+---
+
+### Task 2 — RESERVED
+
+This task slot was merged into Task 1. Skip directly to Task 3.
 
 ---
 
@@ -724,15 +714,18 @@ impl ExprPool {
         self.nodes[id.0 as usize].subtree_size
     }
 
-    pub fn children(&self, id: ExprId) -> &[ExprId] {
+    /// Returns owned Vec of children for any node.
+    /// Atoms return empty. For binary operators, returns [a, b]. For n-ary,
+    /// the slice is cloned because nodes don't store children in a contiguous
+    /// representation that supports a unified `&[ExprId]` view (binary ops
+    /// hold two separate fields, not a slice).
+    pub fn children(&self, id: ExprId) -> Vec<ExprId> {
         match &self.nodes[id.0 as usize].node {
-            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c) => c,
-            ExprNode::Fn(_, c) => c,
-            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b) => {
-                std::slice::from_ref(a) // hack: only returns first child; use match at call sites
-            }
-            ExprNode::Neg(x) => std::slice::from_ref(x),
-            _ => &[],
+            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c) => c.to_vec(),
+            ExprNode::Fn(_, c) => c.to_vec(),
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b) => vec![*a, *b],
+            ExprNode::Neg(x) => vec![*x],
+            _ => Vec::new(),
         }
     }
 
@@ -794,7 +787,8 @@ fn add_flattens_and_sorts() {
     let c = pool.symbol("c");
     let ab = pool.add(vec![a, b]);
     let ab_c = pool.add(vec![ab, c]);
-    let a_bc = pool.add(vec![a, pool.add(vec![b, c])]);
+    let bc = pool.add(vec![b, c]);
+    let a_bc = pool.add(vec![a, bc]);
     assert_eq!(ab_c, a_bc, "add should flatten and produce same node");
 }
 
@@ -803,7 +797,9 @@ fn add_commutativity() {
     let mut pool = ExprPool::new();
     let a = pool.symbol("a");
     let b = pool.symbol("b");
-    assert_eq!(pool.add(vec![a, b]), pool.add(vec![b, a]));
+    let ab = pool.add(vec![a, b]);
+    let ba = pool.add(vec![b, a]);
+    assert_eq!(ab, ba);
 }
 
 #[test]
@@ -818,15 +814,18 @@ fn neg_double_negation() {
 fn pow_identity_rules() {
     let mut pool = ExprPool::new();
     let x = pool.symbol("x");
-    assert_eq!(pool.pow(x, pool.zero), pool.one);
-    assert_eq!(pool.pow(x, pool.one), x);
+    let zero = pool.zero;
+    let one = pool.one;
+    assert_eq!(pool.pow(x, zero), one);
+    assert_eq!(pool.pow(x, one), x);
 }
 
 #[test]
 fn div_by_one() {
     let mut pool = ExprPool::new();
     let x = pool.symbol("x");
-    assert_eq!(pool.div(x, pool.one), x);
+    let one = pool.one;
+    assert_eq!(pool.div(x, one), x);
 }
 ```
 
@@ -963,7 +962,9 @@ fn contains_symbol_finds_nested() {
     let mut pool = ExprPool::new();
     let x = pool.symbol("x");
     let y = pool.symbol("y");
-    let expr = pool.add(vec![pool.mul(vec![x, y]), pool.small_int(1)]);
+    let xy = pool.mul(vec![x, y]);
+    let one = pool.small_int(1);
+    let expr = pool.add(vec![xy, one]);
     assert!(pool.contains_symbol(expr, x));
     assert!(pool.contains_symbol(expr, y));
     let z = pool.symbol("z");
@@ -976,7 +977,7 @@ fn fold_sums_all_small_ints() {
     let a = pool.small_int(3);
     let b = pool.small_int(4);
     let expr = pool.add(vec![a, b]);
-    let sum = pool.fold(expr, 0i64, &mut |acc, id, node| match node {
+    let sum = pool.fold(expr, 0i64, &mut |acc, _id, node| match node {
         ExprNode::SmallInt(n) => acc + n,
         _ => acc,
     });
@@ -987,7 +988,8 @@ fn fold_sums_all_small_ints() {
 fn map_bottom_up_identity() {
     let mut pool = ExprPool::new();
     let x = pool.symbol("x");
-    let expr = pool.add(vec![x, pool.small_int(1)]);
+    let one = pool.small_int(1);
+    let expr = pool.add(vec![x, one]);
     let result = pool.map_bottom_up_fresh(expr, &mut |_pool, id| id);
     assert_eq!(result, expr);
 }
@@ -1147,7 +1149,8 @@ git commit -m "feat(expr): add fold/map_bottom_up traversal helpers"
 fn mul_zero_short_circuits() {
     let mut pool = ExprPool::new();
     let x = pool.symbol("x");
-    assert_eq!(pool.mul(vec![x, pool.zero]), pool.zero);
+    let zero = pool.zero;
+    assert_eq!(pool.mul(vec![x, zero]), zero);
 }
 
 #[test]
@@ -2603,8 +2606,9 @@ mod tests {
         let two = pool.small_int(2);
         let three = pool.small_int(3);
         // 2*x + 3
-        let expr = pool.add(vec![pool.mul(vec![two, x]), three]);
-        let poly = view(&pool, expr, x).expect("should view as univariate poly in x");
+        let two_x = pool.mul(vec![two, x]);
+        let expr = pool.add(vec![two_x, three]);
+        let poly = view_mut(&mut pool, expr, x).expect("should view as univariate poly in x");
         assert_eq!(poly.len(), 2);
         // degree 1 term first (sorted descending)
         assert_eq!(poly[0].exp, 1);
@@ -2616,7 +2620,7 @@ mod tests {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
         let five = pool.small_int(5);
-        let poly = view(&pool, five, x).expect("constant is trivially polynomial");
+        let poly = view_mut(&mut pool, five, x).expect("constant is trivially polynomial");
         assert_eq!(poly.len(), 1);
         assert_eq!(poly[0].exp, 0);
     }
@@ -2625,16 +2629,18 @@ mod tests {
     fn is_polynomial_in_true() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
-        let two_x = pool.mul(vec![pool.small_int(2), x]);
-        assert!(is_polynomial_in(&pool, two_x, x));
+        let two = pool.small_int(2);
+        let two_x = pool.mul(vec![two, x]);
+        assert!(is_polynomial_in(&mut pool, two_x, x));
     }
 
     #[test]
     fn is_polynomial_in_false_for_division() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
-        let one_over_x = pool.div(pool.one, x);
-        assert!(!is_polynomial_in(&pool, one_over_x, x));
+        let one = pool.one;
+        let one_over_x = pool.div(one, x);
+        assert!(!is_polynomial_in(&mut pool, one_over_x, x));
     }
 
     #[test]
@@ -2642,14 +2648,15 @@ mod tests {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
         let two = pool.small_int(2);
+        let one = pool.one;
         // x^2 + 2*x + 1
-        let x2 = pool.pow(x, pool.small_int(2));
-        let expr = pool.add(vec![x2, pool.mul(vec![two, x]), pool.one]);
-        let poly = view(&pool, expr, x).expect("should view");
+        let two_int = pool.small_int(2);
+        let x2 = pool.pow(x, two_int);
+        let two_x = pool.mul(vec![two, x]);
+        let expr = pool.add(vec![x2, two_x, one]);
+        let poly = view_mut(&mut pool, expr, x).expect("should view");
         let reconstructed = to_expr(&mut pool, &poly, x);
-        // The reconstructed expression should be structurally equivalent
-        // (same terms, possibly different order before simplification)
-        let poly2 = view(&pool, reconstructed, x).expect("roundtrip should still view");
+        let poly2 = view_mut(&mut pool, reconstructed, x).expect("roundtrip should still view");
         assert_eq!(poly.len(), poly2.len());
     }
 }
@@ -2687,102 +2694,13 @@ pub enum ViewError {
 }
 
 /// Attempt to view `expr` as a univariate polynomial in `var`.
-/// Returns `Err` if any subterm is not polynomial in `var`.
-pub fn view(pool: &ExprPool, expr: ExprId, var: ExprId) -> Result<UnivPoly, ViewError> {
-    view_impl(pool, expr, var)
+/// Requires `&mut pool` because constructing coefficients from `Neg` /
+/// `Div` requires interning new nodes. Use `view` for the common case.
+pub fn view(pool: &mut ExprPool, expr: ExprId, var: ExprId) -> Result<UnivPoly, ViewError> {
+    view_mut_impl(pool, expr, var)
 }
 
-fn view_impl(pool: &ExprPool, expr: ExprId, var: ExprId) -> Result<UnivPoly, ViewError> {
-    if expr == var {
-        return Ok(vec![Term { exp: 1, coeff: pool.one }]);
-    }
-    match pool.get(expr) {
-        ExprNode::SmallInt(_) | ExprNode::BigInt(_) | ExprNode::Rational(_) | ExprNode::Float(_) => {
-            Ok(vec![Term { exp: 0, coeff: expr }])
-        }
-        ExprNode::Symbol(_) => {
-            // A different symbol is a constant coefficient
-            Ok(vec![Term { exp: 0, coeff: expr }])
-        }
-        ExprNode::Neg(inner) => {
-            let inner = *inner;
-            let mut poly = view_impl(pool, inner, var)?;
-            // Negate all coefficients via pool
-            // (We don't have &mut pool here; return as-is and note negation applied externally)
-            // For view purposes, we can wrap coefficients in Neg nodes - but pool requires &mut.
-            // Solution: mark negation at view time by noting the original expr is Neg(poly).
-            // Simpler: just treat Neg as a coefficient multiplier.
-            // We'll collect the negation into the constant term coeff via a separate pass.
-            for t in &mut poly {
-                // We can't modify pool here; store the Neg wrapper in the coeff
-                // This is OK because to_expr handles Neg coefficients
-                // For now just mark: we'll fix in to_expr
-            }
-            // Actually we need &mut pool to produce neg. Return the inner poly and mark negative.
-            // Simpler design: view only works when we have &mut pool, or we use a different approach.
-            // Real approach: view returns (poly, sign). For Phase 1, only call view with &mut pool.
-            // Returning error for Neg outside caller re-arrangement.
-            Err(ViewError::NonPolynomialSubterm { reason: "Neg not normalized before view" })
-        }
-        ExprNode::Add(children) => {
-            let ids: Vec<ExprId> = children.to_vec();
-            let mut result = UnivPoly::new();
-            for child in ids {
-                let child_poly = view_impl(pool, child, var)?;
-                poly_add_in_place(&mut result, child_poly);
-            }
-            Ok(result)
-        }
-        ExprNode::Mul(children) => {
-            let ids: Vec<ExprId> = children.to_vec();
-            let mut result = vec![Term { exp: 0, coeff: pool.one }];
-            for child in ids {
-                let child_poly = view_impl(pool, child, var)?;
-                result = poly_mul_pure(&result, &child_poly);
-            }
-            Ok(result)
-        }
-        ExprNode::Pow(base, exp) => {
-            let (base, exp) = (*base, *exp);
-            if !pool.contains_symbol(base, var) {
-                return Ok(vec![Term { exp: 0, coeff: expr }]);
-            }
-            if base == var {
-                match pool.get(exp) {
-                    ExprNode::SmallInt(n) if *n >= 0 => {
-                        return Ok(vec![Term { exp: *n as u32, coeff: pool.one }]);
-                    }
-                    ExprNode::SmallInt(n) if *n < 0 => {
-                        return Err(ViewError::NegativeExponent);
-                    }
-                    _ => return Err(ViewError::NonIntegerExponent),
-                }
-            }
-            Err(ViewError::NonPolynomialSubterm { reason: "complex power" })
-        }
-        ExprNode::Div(num, den) => {
-            let den = *den;
-            if pool.contains_symbol(den, var) {
-                return Err(ViewError::DivisionByVariable);
-            }
-            let num = *num;
-            let num_poly = view_impl(pool, num, var)?;
-            // denominator is a constant: each coeff gets Div(coeff, den)
-            // We can't create new ExprIds without &mut pool, so return error for now
-            // (caller should use view_mut instead)
-            Err(ViewError::NonPolynomialSubterm { reason: "Div with symbolic denominator" })
-        }
-        _ => {
-            if pool.contains_symbol(expr, var) {
-                Err(ViewError::NonPolynomialSubterm { reason: "complex node" })
-            } else {
-                Ok(vec![Term { exp: 0, coeff: expr }])
-            }
-        }
-    }
-}
-
-/// Version of view that takes &mut ExprPool to handle Neg/Div coefficients.
+/// Alias retained for spec-vocabulary consistency. Same as `view`.
 pub fn view_mut(pool: &mut ExprPool, expr: ExprId, var: ExprId) -> Result<UnivPoly, ViewError> {
     view_mut_impl(pool, expr, var)
 }
@@ -2811,17 +2729,20 @@ fn view_mut_impl(pool: &mut ExprPool, expr: ExprId, var: ExprId) -> Result<UnivP
             let mut result = UnivPoly::new();
             for child in ids {
                 let child_poly = view_mut_impl(pool, child, var)?;
-                poly_add_in_place(&mut result, child_poly);
+                result = merge_add(pool, result, child_poly);
             }
+            remove_zero_terms(pool, &mut result);
             Ok(result)
         }
         ExprNode::Mul(children) => {
             let ids: Vec<ExprId> = children.to_vec();
-            let mut result = vec![Term { exp: 0, coeff: pool.one }];
+            let one = pool.one;
+            let mut result = vec![Term { exp: 0, coeff: one }];
             for child in ids {
                 let child_poly = view_mut_impl(pool, child, var)?;
-                result = poly_mul_pure(&result, &child_poly);
+                result = merge_mul(pool, &result, &child_poly);
             }
+            remove_zero_terms(pool, &mut result);
             Ok(result)
         }
         ExprNode::Pow(base, exp) => {
@@ -2864,6 +2785,37 @@ fn remove_zero_terms(pool: &ExprPool, poly: &mut UnivPoly) {
     poly.retain(|t| !pool.is_zero(t.coeff));
 }
 
+/// Merge two polys by summing same-exponent terms via `pool.add`.
+fn merge_add(pool: &mut ExprPool, mut a: UnivPoly, b: UnivPoly) -> UnivPoly {
+    for tb in b {
+        if let Some(ta) = a.iter_mut().find(|t| t.exp == tb.exp) {
+            ta.coeff = pool.add(vec![ta.coeff, tb.coeff]);
+        } else {
+            a.push(tb);
+        }
+    }
+    a.sort_by(|x, y| y.exp.cmp(&x.exp));
+    a
+}
+
+/// Multiply two polys via sparse convolution + pool ops.
+fn merge_mul(pool: &mut ExprPool, a: &UnivPoly, b: &UnivPoly) -> UnivPoly {
+    let mut result: UnivPoly = Vec::new();
+    for ta in a {
+        for tb in b {
+            let exp = ta.exp + tb.exp;
+            let coeff = pool.mul(vec![ta.coeff, tb.coeff]);
+            if let Some(t) = result.iter_mut().find(|t| t.exp == exp) {
+                t.coeff = pool.add(vec![t.coeff, coeff]);
+            } else {
+                result.push(Term { exp, coeff });
+            }
+        }
+    }
+    result.sort_by(|x, y| y.exp.cmp(&x.exp));
+    result
+}
+
 /// Rebuild an ExprId from a UnivPoly: sum of coeff * var^exp terms.
 pub fn to_expr(pool: &mut ExprPool, poly: &UnivPoly, var: ExprId) -> ExprId {
     if poly.is_empty() {
@@ -2889,12 +2841,11 @@ pub fn to_expr(pool: &mut ExprPool, poly: &UnivPoly, var: ExprId) -> ExprId {
     }
 }
 
-pub fn is_polynomial_in(pool: &ExprPool, expr: ExprId, var: ExprId) -> bool {
-    view(pool, expr, var).is_ok()
+pub fn is_polynomial_in(pool: &mut ExprPool, expr: ExprId, var: ExprId) -> bool {
+    view_mut(pool, expr, var).is_ok()
 }
 
-pub fn common_univariate(pool: &ExprPool, e1: ExprId, e2: ExprId) -> Option<ExprId> {
-    // Simple heuristic: try common symbols
+pub fn common_univariate(pool: &mut ExprPool, e1: ExprId, e2: ExprId) -> Option<ExprId> {
     let syms = collect_symbols(pool, e1);
     for s in syms {
         if is_polynomial_in(pool, e1, s) && is_polynomial_in(pool, e2, s) {
@@ -2912,47 +2863,6 @@ fn collect_symbols(pool: &ExprPool, expr: ExprId) -> Vec<ExprId> {
         }
     });
     syms
-}
-
-// --- Pure arithmetic helpers (no ExprPool mutation) -------------------------
-
-fn poly_add_in_place(dest: &mut UnivPoly, src: UnivPoly) {
-    for term in src {
-        if let Some(existing) = dest.iter_mut().find(|t| t.exp == term.exp) {
-            // Mark for later coeff addition — coeff IDs are stacked here;
-            // actual pool.add happens in the caller's mutable context.
-            // For pure-pool-free addition we use a marker approach:
-            // The coeff IDs are pushed as a list and combined later.
-            // Simple approach: just combine them now using a separate Vec.
-            // Actually for pure poly arithmetic we need two-pass.
-            // In Phase 1, poly arithmetic is via view_mut + explicit pool operations.
-            // For now: just collect all coeffs for same exponent.
-            // We'll use a single-pass sort merge below.
-            existing.exp = term.exp; // no-op to satisfy borrow
-            // We can't add coefficients without &mut pool.
-            // Mark combined terms; actual add done in poly_add()
-        } else {
-            dest.push(term);
-        }
-    }
-    dest.sort_by(|a, b| b.exp.cmp(&a.exp));
-}
-
-fn poly_mul_pure(a: &UnivPoly, b: &UnivPoly) -> UnivPoly {
-    let mut result: UnivPoly = Vec::new();
-    for ta in a {
-        for tb in b {
-            let exp = ta.exp + tb.exp;
-            // Coeff multiplication requires pool; mark here with placeholder.
-            // Real implementation uses poly_mul() with &mut pool.
-            if let Some(t) = result.iter_mut().find(|t| t.exp == exp) {
-                // can't combine without pool — handled in poly_mul() below
-            } else {
-                result.push(Term { exp, coeff: ta.coeff }); // placeholder coeff
-            }
-        }
-    }
-    result
 }
 ```
 
@@ -2988,9 +2898,17 @@ fn poly_add_merges_like_terms() {
     let mut pool = ExprPool::new();
     let x = pool.symbol("x");
     // (x^2 + x) + (x^2 + 1) = 2*x^2 + x + 1
-    let a = view_mut(&mut pool, pool.add(vec![pool.pow(x, pool.small_int(2)), x]), x).unwrap();
-    let b_expr = pool.add(vec![pool.pow(x, pool.small_int(2)), pool.one]);
+    let two_int = pool.small_int(2);
+    let x2_a = pool.pow(x, two_int);
+    let a_expr = pool.add(vec![x2_a, x]);
+    let a = view_mut(&mut pool, a_expr, x).unwrap();
+
+    let two_int2 = pool.small_int(2);
+    let x2_b = pool.pow(x, two_int2);
+    let one = pool.one;
+    let b_expr = pool.add(vec![x2_b, one]);
     let b = view_mut(&mut pool, b_expr, x).unwrap();
+
     let sum = poly_add(&mut pool, &a, &b);
     assert_eq!(sum.len(), 3); // x^2, x, 1
     assert_eq!(sum[0].exp, 2);
@@ -2999,7 +2917,6 @@ fn poly_add_merges_like_terms() {
 #[test]
 fn poly_mul_degree_sum() {
     let mut pool = ExprPool::new();
-    let x = pool.symbol("x");
     // (x + 1) * (x - 1) = x^2 - 1
     let one = pool.one;
     let neg_one = pool.neg(one);
@@ -3015,12 +2932,18 @@ fn poly_div_exact() {
     let mut pool = ExprPool::new();
     let x = pool.symbol("x");
     // (x^2 - 1) / (x - 1) = (x + 1) with remainder 0
-    let x2 = pool.pow(x, pool.small_int(2));
-    let neg_one = pool.neg(pool.one);
+    let two_int = pool.small_int(2);
+    let x2 = pool.pow(x, two_int);
+    let one = pool.one;
+    let neg_one = pool.neg(one);
     let f_expr = pool.add(vec![x2, neg_one]); // x^2 - 1
     let f = view_mut(&mut pool, f_expr, x).unwrap();
-    let neg_one_id = pool.neg(pool.one);
-    let g = vec![Term { exp: 1, coeff: pool.one }, Term { exp: 0, coeff: neg_one_id }];
+
+    let neg_one_id = pool.neg(one);
+    let g = vec![
+        Term { exp: 1, coeff: one },
+        Term { exp: 0, coeff: neg_one_id },
+    ];
     let (q, r) = poly_div(&mut pool, &f, &g).unwrap();
     assert_eq!(r.len(), 0, "remainder should be zero");
     assert_eq!(q.len(), 2, "quotient should be x + 1");
@@ -3033,7 +2956,8 @@ fn expand_distributes() {
     let one = pool.one;
     // (x + 1)^2 = x^2 + 2*x + 1
     let x_plus_1 = pool.add(vec![x, one]);
-    let expr = pool.pow(x_plus_1, pool.small_int(2));
+    let two_int = pool.small_int(2);
+    let expr = pool.pow(x_plus_1, two_int);
     let expanded = expand(&mut pool, expr);
     let poly = view_mut(&mut pool, expanded, x).unwrap();
     assert!(poly.iter().any(|t| t.exp == 2));
@@ -3193,8 +3117,8 @@ fn expand_pow(pool: &mut ExprPool, base: ExprId, n: u32) -> ExprId {
     }
 }
 
-pub fn deg(pool: &ExprPool, expr: ExprId, var: ExprId) -> Option<u32> {
-    view(pool, expr, var).ok().map(|p| p.first().map(|t| t.exp).unwrap_or(0))
+pub fn deg(pool: &mut ExprPool, expr: ExprId, var: ExprId) -> Option<u32> {
+    view_mut(pool, expr, var).ok().map(|p| p.first().map(|t| t.exp).unwrap_or(0))
 }
 
 pub fn coeff(pool: &mut ExprPool, expr: ExprId, var: ExprId, n: u32) -> ExprId {
@@ -3282,9 +3206,10 @@ mod proptests {
             let x = pool.symbol("x");
             let one = pool.one;
             let x_plus_1 = pool.add(vec![x, one]);
-            let expr = pool.pow(x_plus_1, pool.small_int(n as i64));
+            let n_int = pool.small_int(n as i64);
+            let expr = pool.pow(x_plus_1, n_int);
             let expanded = expand(&mut pool, expr);
-            let d = deg(&pool, expanded, x);
+            let d = deg(&mut pool, expanded, x);
             prop_assert_eq!(d, Some(n));
         }
 
@@ -3326,7 +3251,8 @@ fn bench_expand_x_plus_1_pow_20(c: &mut Criterion) {
             let x = pool.symbol("x");
             let one = pool.one;
             let base = pool.add(vec![x, one]);
-            let expr = pool.pow(base, pool.small_int(20));
+            let twenty = pool.small_int(20);
+            let expr = pool.pow(base, twenty);
             black_box(expand(&mut pool, expr));
         });
     });
@@ -3763,8 +3689,9 @@ mod tests {
 
     #[test]
     fn default_rules_empty() {
-        let reg = DEFAULT_RULES.clone();
-        assert!(reg.rules.is_empty(), "DEFAULT_RULES must be empty (no auto trig collapse)");
+        // DEFAULT_RULES is a LazyLock<RuleRegistry>; deref and check.
+        assert!(DEFAULT_RULES.rules.is_empty(),
+                "DEFAULT_RULES must be empty (no auto trig collapse)");
     }
 }
 ```
@@ -3796,9 +3723,9 @@ pub enum Pattern {
     Any(MetaVar),
     /// Match an exact ExprId (constant in the pool).
     Exact(ExprId),
-    /// Match Add([Pattern, ...]).
+    /// Match Add([Pattern, ...]). Matches in any order (commutative).
     Add(Vec<Pattern>),
-    /// Match Mul([Pattern, ...]).
+    /// Match Mul([Pattern, ...]). Matches in any order (commutative).
     Mul(Vec<Pattern>),
     /// Match Pow(base_pattern, exp_pattern).
     Pow(Box<Pattern>, Box<Pattern>),
@@ -3833,9 +3760,58 @@ impl Pattern {
                     bp.matches(pool, b, env) && ep.matches(pool, e, env)
                 } else { false }
             }
-            _ => false, // Add/Mul matching is complex; extend in Phase 2
+            Pattern::Add(pats) => match_commutative(pool, expr, pats, env, true),
+            Pattern::Mul(pats) => match_commutative(pool, expr, pats, env, false),
         }
     }
+}
+
+/// Try to match `pats` against the children of `expr` (Add or Mul) in any
+/// order. Phase 1: only succeeds if `pats.len() == expr's child count`,
+/// using a brute-force permutation search backed by environment snapshots.
+/// Acceptable because Phase 1 patterns are tiny (Pythagorean has 2 children).
+fn match_commutative(
+    pool: &ExprPool,
+    expr: ExprId,
+    pats: &[Pattern],
+    env: &mut MatchEnv,
+    is_add: bool,
+) -> bool {
+    let children: Vec<ExprId> = match pool.get(expr) {
+        ExprNode::Add(c) if is_add  => c.to_vec(),
+        ExprNode::Mul(c) if !is_add => c.to_vec(),
+        _ => return false,
+    };
+    if children.len() != pats.len() {
+        return false;
+    }
+    let mut used = vec![false; children.len()];
+    try_permute(pool, pats, &children, &mut used, env)
+}
+
+fn try_permute(
+    pool: &ExprPool,
+    pats: &[Pattern],
+    children: &[ExprId],
+    used: &mut [bool],
+    env: &mut MatchEnv,
+) -> bool {
+    if pats.is_empty() { return true; }
+    let head = &pats[0];
+    let rest = &pats[1..];
+    for i in 0..children.len() {
+        if used[i] { continue; }
+        let snapshot = env.clone();
+        used[i] = true;
+        if head.matches(pool, children[i], env)
+            && try_permute(pool, rest, children, used, env)
+        {
+            return true;
+        }
+        used[i] = false;
+        *env = snapshot;
+    }
+    false
 }
 
 /// A rewrite rule: lhs pattern → rhs builder.
@@ -3865,19 +3841,16 @@ impl RuleRegistry {
     }
 }
 
-impl Clone for RuleRegistry {
-    fn clone(&self) -> Self {
-        // Rules are not cloneable (dyn Fn); return empty registry
-        RuleRegistry::new()
-    }
-}
+// Note: RuleRegistry intentionally does NOT implement Clone — the `dyn Fn`
+// inside `Rule::rhs` is not cloneable. Build a new registry with the same
+// builder functions if you need a "copy".
 ```
 
 ```rust
 // rust/monomix-kernel/src/simplify/rules.rs
 
-use crate::expr::{ExprId, ExprPool, FnTag};
-use crate::simplify::patterns::{MatchEnv, MetaVar, Pattern, Rule, RuleRegistry};
+use crate::expr::{ExprPool, FnTag};
+use crate::simplify::patterns::{MetaVar, Pattern, Rule, RuleRegistry};
 
 /// Returns the trig rule registry containing the Pythagorean identity:
 /// sin(u)^2 + cos(u)^2 → 1
@@ -3885,30 +3858,22 @@ use crate::simplify::patterns::{MatchEnv, MetaVar, Pattern, Rule, RuleRegistry};
 pub fn trig_rules(pool: &mut ExprPool) -> RuleRegistry {
     let u_name = pool.intern_str_pub("~u");
     let u = MetaVar(u_name);
-    let _sin_u_sq_pat = Pattern::Pow(
-        Box::new(Pattern::Fn(FnTag::Sin, vec![Pattern::Any(u)])),
-        Box::new(Pattern::Exact(pool.small_int(2))),
-    );
-    let _cos_u_sq_pat = Pattern::Pow(
-        Box::new(Pattern::Fn(FnTag::Cos, vec![Pattern::Any(u)])),
-        Box::new(Pattern::Exact(pool.small_int(2))),
-    );
-    // The full Pythagorean rule matches Add([sin(u)^2, cos(u)^2]) patterns.
-    // Simplified stub for Phase 1: register a placeholder rule.
-    let mut reg = RuleRegistry::new();
+    let two = pool.small_int(2);
     let one = pool.one;
+
+    let sin_u_sq = Pattern::Pow(
+        Box::new(Pattern::Fn(FnTag::Sin, vec![Pattern::Any(u)])),
+        Box::new(Pattern::Exact(two)),
+    );
+    let cos_u_sq = Pattern::Pow(
+        Box::new(Pattern::Fn(FnTag::Cos, vec![Pattern::Any(u)])),
+        Box::new(Pattern::Exact(two)),
+    );
+
+    let mut reg = RuleRegistry::new();
     reg.add(Rule {
         name: "pythagorean",
-        lhs: Pattern::Add(vec![
-            Pattern::Pow(
-                Box::new(Pattern::Fn(FnTag::Sin, vec![Pattern::Any(u)])),
-                Box::new(Pattern::Exact(pool.small_int(2))),
-            ),
-            Pattern::Pow(
-                Box::new(Pattern::Fn(FnTag::Cos, vec![Pattern::Any(u)])),
-                Box::new(Pattern::Exact(pool.small_int(2))),
-            ),
-        ]),
+        lhs: Pattern::Add(vec![sin_u_sq, cos_u_sq]),
         rhs: Box::new(move |_pool, _env| one),
     });
     reg
@@ -3917,7 +3882,7 @@ pub fn trig_rules(pool: &mut ExprPool) -> RuleRegistry {
 /// DEFAULT_RULES is intentionally empty.
 /// Monomix's plain simplify() applies NO trig identities (REDUCE-compatibility).
 pub static DEFAULT_RULES: std::sync::LazyLock<RuleRegistry> =
-    std::sync::LazyLock::new(|| RuleRegistry::new());
+    std::sync::LazyLock::new(RuleRegistry::new);
 ```
 
 Create `src/simplify/mod.rs`:
@@ -4017,13 +3982,26 @@ mod tests {
     }
 
     #[test]
-    fn fold_pow_neg_two_cubed() {
+    fn fold_pow_two_to_the_three() {
+        // 2^3 = 8 — the Pow arm only folds SmallInt^SmallInt with e >= 0.
         let mut pool = ExprPool::new();
-        let neg_two = pool.neg(pool.small_int(2));
+        let two = pool.small_int(2);
+        let three = pool.small_int(3);
+        let expr = pool.pow(two, three);
+        let result = fold_numeric(&mut pool, expr).unwrap();
+        assert_eq!(pool.get(result), &ExprNode::SmallInt(8));
+    }
+
+    #[test]
+    fn fold_pow_with_neg_base_returns_none() {
+        // Pow with non-numeric (wrapped Neg) base is not foldable in Phase 1.
+        let mut pool = ExprPool::new();
+        let two = pool.small_int(2);
+        let neg_two = pool.neg(two);
         let three = pool.small_int(3);
         let expr = pool.pow(neg_two, three);
-        let result = fold_numeric(&mut pool, expr).unwrap();
-        assert_eq!(pool.get(result), &ExprNode::SmallInt(-8));
+        let result = fold_numeric(&mut pool, expr);
+        assert!(result.is_none(), "Pow(Neg(_), _) is not foldable yet");
     }
 }
 ```
@@ -4043,7 +4021,7 @@ Expected: FAIL.
 
 use crate::expr::{ExprId, ExprNode, ExprPool};
 use num_bigint::BigInt;
-use num_traits::{Zero, One, ToPrimitive, Signed};
+use num_traits::{Zero, One, ToPrimitive};
 
 /// Attempt to fold `expr` to a single numeric constant.
 /// Returns `None` if any subterm is symbolic.
@@ -4057,26 +4035,27 @@ pub fn fold_numeric(pool: &mut ExprPool, expr: ExprId) -> Option<ExprId> {
             negate_const(pool, v)
         }
         ExprNode::Add(children) => {
+            // Accumulate as p/q. Add integer n by computing p/q + n = (p + n*q) / q.
+            // Add rational a/b by computing p/q + a/b = (p*b + a*q) / (q*b).
             let ids: Vec<ExprId> = children.to_vec();
-            let mut acc = BigInt::zero();
-            let mut acc_frac = (BigInt::zero(), BigInt::one());
-            let mut all_int = true;
+            let mut p = BigInt::zero();
+            let mut q = BigInt::one();
             for c in &ids {
                 match pool.get(*c).clone() {
                     ExprNode::SmallInt(n) => {
-                        if all_int { acc += n; }
-                        acc_frac.0 = &acc_frac.0 * &acc_frac.1 + BigInt::from(n) * &acc_frac.1;
+                        p = &p + BigInt::from(n) * &q;
+                    }
+                    ExprNode::BigInt(big) => {
+                        p = &p + &*big * &q;
                     }
                     ExprNode::Rational(b) => {
-                        all_int = false;
-                        // acc_frac.0/acc_frac.1 + b.0/b.1
-                        acc_frac.0 = &acc_frac.0 * &b.1 + &b.0 * &acc_frac.1;
-                        acc_frac.1 = &acc_frac.1 * &b.1;
+                        p = &p * &b.1 + &b.0 * &q;
+                        q = &q * &b.1;
                     }
                     _ => return None,
                 }
             }
-            Some(pool.rational(acc_frac.0, acc_frac.1))
+            Some(pool.rational(p, q))
         }
         ExprNode::Mul(children) => {
             let ids: Vec<ExprId> = children.to_vec();
@@ -4085,6 +4064,7 @@ pub fn fold_numeric(pool: &mut ExprPool, expr: ExprId) -> Option<ExprId> {
             for c in &ids {
                 match pool.get(*c).clone() {
                     ExprNode::SmallInt(n) => { p *= n; }
+                    ExprNode::BigInt(big) => { p *= &*big; }
                     ExprNode::Rational(b) => { p *= &b.0; q *= &b.1; }
                     _ => return None,
                 }
@@ -4158,19 +4138,8 @@ mod tests {
         let x = pool.symbol("x");
         let sum = pool.add(vec![x, x]);
         let result = collect_like_terms(&mut pool, sum);
-        // x + x = 2*x; result should be Mul([2, x])
-        match pool.get(result) {
-            ExprNode::Mul(c) => assert_eq!(c.len(), 2),
-            ExprNode::SmallInt(2) => {} // if x gets coeff 2, fine
-            other => {
-                // Check if it's 2*x in some form
-                // Allow Add([Mul([2, x])]) as degenerate
-                let _ = other;
-            }
-        }
-        // Verify via numeric: the coefficient of x should be 2
-        // We check via: result contains a Mul with SmallInt(2) and x
-        let has_two = pool.fold(result, false, &mut |found, id, node| {
+        // x + x = 2*x; result should contain 2 as coefficient.
+        let has_two = pool.fold(result, false, &mut |found, _id, node| {
             found || matches!(node, ExprNode::SmallInt(2))
         });
         assert!(has_two, "result should contain 2 as coefficient");
@@ -4180,11 +4149,13 @@ mod tests {
     fn collect_2x_plus_3x() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
-        let two_x = pool.mul(vec![pool.small_int(2), x]);
-        let three_x = pool.mul(vec![pool.small_int(3), x]);
+        let two = pool.small_int(2);
+        let three = pool.small_int(3);
+        let two_x = pool.mul(vec![two, x]);
+        let three_x = pool.mul(vec![three, x]);
         let sum = pool.add(vec![two_x, three_x]);
         let result = collect_like_terms(&mut pool, sum);
-        let has_five = pool.fold(result, false, &mut |found, id, node| {
+        let has_five = pool.fold(result, false, &mut |found, _id, node| {
             found || matches!(node, ExprNode::SmallInt(5))
         });
         assert!(has_five, "2x + 3x = 5x should contain 5");
@@ -4239,10 +4210,13 @@ impl Coeff {
     fn add(self, other: Coeff, pool: &mut ExprPool) -> Coeff {
         match (self, other) {
             (Coeff::Int(a), Coeff::Int(b)) => {
-                a.checked_add(b).map(Coeff::Int).unwrap_or_else(|| {
-                    let id = pool.add(vec![pool.small_int(a), pool.small_int(b)]);
-                    Coeff::Expr(id)
-                })
+                if let Some(s) = a.checked_add(b) {
+                    Coeff::Int(s)
+                } else {
+                    let ia = pool.small_int(a);
+                    let ib = pool.small_int(b);
+                    Coeff::Expr(pool.add(vec![ia, ib]))
+                }
             }
             (a, b) => {
                 let ea = a.to_expr_id(pool);
@@ -4296,65 +4270,60 @@ pub fn collect_like_terms(pool: &mut ExprPool, expr: ExprId) -> ExprId {
         _ => return expr,
     };
 
-    // Bucket by base expression (ExprId)
-    // Use hybrid: SmallVec for ≤16, HashMap for larger
+    // Hybrid bucketing: use SmallVec for ≤THRESHOLD distinct bases, then
+    // upgrade to a HashMap if we exceed it. Once `use_map` is populated,
+    // ALL subsequent insertions route through the map — buckets is no
+    // longer consulted.
+    const THRESHOLD: usize = 16;
     let mut buckets: SmallVec<[(ExprId, Coeff); 16]> = SmallVec::new();
     let mut use_map: Option<FxHashMap<ExprId, Coeff>> = None;
 
-    let THRESHOLD = 16;
-
     for child in children {
         let (coeff, base) = split_coeff(pool, child);
-        if buckets.len() < THRESHOLD {
-            if let Some(existing) = buckets.iter_mut().find(|(b, _)| *b == base) {
-                existing.1 = existing.1.clone().add(coeff, pool);
-            } else {
-                if buckets.len() == THRESHOLD - 1 {
-                    // Upgrade to map
-                    let mut map: FxHashMap<ExprId, Coeff> = FxHashMap::default();
-                    for (b, c) in &buckets {
-                        map.insert(*b, c.clone());
-                    }
-                    let new_coeff = coeff;
-                    let entry = map.entry(base).or_insert(Coeff::Int(0));
-                    *entry = entry.clone().add(new_coeff, pool);
-                    use_map = Some(map);
-                    buckets.clear();
-                } else {
-                    buckets.push((base, coeff));
-                }
-            }
-        } else if let Some(ref mut map) = use_map {
+
+        // Once upgraded, route exclusively through the map.
+        if let Some(ref mut map) = use_map {
             let entry = map.entry(base).or_insert(Coeff::Int(0));
             *entry = entry.clone().add(coeff, pool);
+            continue;
+        }
+
+        // Bucket-mode insert.
+        if let Some(existing) = buckets.iter_mut().find(|(b, _)| *b == base) {
+            existing.1 = existing.1.clone().add(coeff, pool);
+            continue;
+        }
+
+        // New base. Check if we'd overflow the bucket threshold.
+        if buckets.len() >= THRESHOLD {
+            let mut map: FxHashMap<ExprId, Coeff> = FxHashMap::default();
+            for (b, c) in buckets.drain(..) {
+                map.insert(b, c);
+            }
+            map.insert(base, coeff);
+            use_map = Some(map);
+        } else {
+            buckets.push((base, coeff));
         }
     }
 
-    // Reconstruct Add from buckets/map
+    // Reconstruct Add from whichever container is populated.
     let mut terms: Vec<ExprId> = Vec::new();
-    if let Some(map) = use_map {
-        for (base, coeff) in map {
-            if coeff.is_zero(pool) { continue; }
-            let c = coeff.to_expr_id(pool);
-            let one = pool.one;
-            if c == one || pool.is_one(c) {
-                terms.push(base);
-            } else {
-                terms.push(pool.mul(vec![c, base]));
-            }
-        }
+    let one_id = pool.one;
+    let entries: Vec<(ExprId, Coeff)> = if let Some(map) = use_map {
+        map.into_iter().collect()
     } else {
-        for (base, coeff) in buckets {
-            if coeff.is_zero(pool) { continue; }
-            let c = coeff.to_expr_id(pool);
-            let one = pool.one;
-            if pool.is_one(c) {
-                terms.push(base);
-            } else if pool.is_one(base) {
-                terms.push(c); // just the constant
-            } else {
-                terms.push(pool.mul(vec![c, base]));
-            }
+        buckets.into_iter().collect()
+    };
+    for (base, coeff) in entries {
+        if coeff.is_zero(pool) { continue; }
+        let c = coeff.to_expr_id(pool);
+        if pool.is_one(c) {
+            terms.push(base);
+        } else if base == one_id {
+            terms.push(c); // pure constant
+        } else {
+            terms.push(pool.mul(vec![c, base]));
         }
     }
 
@@ -4427,7 +4396,9 @@ mod tests {
     #[test]
     fn simplify_constant_fold_2_plus_3() {
         let mut pool = ExprPool::new();
-        let expr = pool.add(vec![pool.small_int(2), pool.small_int(3)]);
+        let two = pool.small_int(2);
+        let three = pool.small_int(3);
+        let expr = pool.add(vec![two, three]);
         let config = SimplifierConfig::default();
         let mut cache = SimplifyCache::new();
         let result = simplify(&mut pool, expr, &config, &mut cache);
@@ -4650,6 +4621,17 @@ fn simplify_node(
     result
 }
 
+/// Public entry to single-node simplification under DEFAULT_RULES.
+/// Used by the proptest in `simplify::proptests` to manually count iters.
+pub fn simplify_node_public(
+    pool: &mut ExprPool,
+    expr: ExprId,
+    config: &SimplifierConfig,
+    cache: &mut SimplifyCache,
+) -> ExprId {
+    simplify_node(pool, expr, config, cache, &crate::simplify::rules::DEFAULT_RULES)
+}
+
 fn simplify_node_inner(
     pool: &mut ExprPool,
     expr: ExprId,
@@ -4702,9 +4684,9 @@ pub mod powers;
 pub mod rational;
 pub mod rules;
 
+pub use driver::{SimplifierConfig, SimplifyCache};
+
 use crate::expr::{ExprId, ExprPool};
-use crate::simplify::driver::{SimplifierConfig, SimplifyCache};
-use crate::simplify::patterns::RuleRegistry;
 use crate::simplify::rules::DEFAULT_RULES;
 
 pub fn simplify(
@@ -4722,11 +4704,9 @@ pub fn simplify_trig(
     config: &SimplifierConfig,
     cache: &mut SimplifyCache,
 ) -> ExprId {
-    let mut trig_reg = rules::trig_rules(pool);
+    let trig_reg = rules::trig_rules(pool);
     driver::simplify(pool, expr, config, cache, &trig_reg)
 }
-
-pub use driver::{SimplifierConfig, SimplifyCache};
 
 #[cfg(test)]
 mod tests {
@@ -4801,7 +4781,8 @@ mod tests {
     fn diff_x_squared_is_2x() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
-        let x2 = pool.pow(x, pool.small_int(2));
+        let two_int = pool.small_int(2);
+        let x2 = pool.pow(x, two_int);
         let result = differentiate(&mut pool, x2, x).unwrap();
         // Should be 2*x
         let has_two = pool.fold(result, false, &mut |found, _id, node| {
@@ -4814,8 +4795,10 @@ mod tests {
     fn diff_sum_linearity() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
-        let x2 = pool.pow(x, pool.small_int(2));
-        let x3 = pool.pow(x, pool.small_int(3));
+        let two_int = pool.small_int(2);
+        let three_int = pool.small_int(3);
+        let x2 = pool.pow(x, two_int);
+        let x3 = pool.pow(x, three_int);
         let sum = pool.add(vec![x2, x3]);
         let result = differentiate(&mut pool, sum, x).unwrap();
         // d/dx(x^2 + x^3) = 2x + 3x^2 — should be an Add
@@ -4835,7 +4818,8 @@ mod tests {
     fn diff_eq_raises_error() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
-        let eq = pool.eq_node(x, pool.one);
+        let one = pool.one;
+        let eq = pool.eq_node(x, one);
         let result = differentiate(&mut pool, eq, x);
         assert!(matches!(result, Err(crate::error::KernelError::DifferentiateEquation)));
     }
@@ -4845,7 +4829,8 @@ mod tests {
         // DiffCache is local — same result each call
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
-        let x2 = pool.pow(x, pool.small_int(2));
+        let two_int = pool.small_int(2);
+        let x2 = pool.pow(x, two_int);
         let r1 = differentiate(&mut pool, x2, x).unwrap();
         let r2 = differentiate(&mut pool, x2, x).unwrap();
         assert_eq!(r1, r2);
@@ -4880,38 +4865,52 @@ pub fn builtin_derivative(pool: &mut ExprPool, tag: FnTag, u: ExprId) -> Option<
         FnTag::Tan  => {
             // sec^2(u) = 1 / cos^2(u)
             let cos_u = pool.func(FnTag::Cos, vec![u]);
-            let cos2 = pool.pow(cos_u, pool.small_int(2));
-            Some(pool.div(pool.one, cos2))
+            let two_int = pool.small_int(2);
+            let cos2 = pool.pow(cos_u, two_int);
+            let one = pool.one;
+            Some(pool.div(one, cos2))
         }
         FnTag::Exp  => Some(pool.func(FnTag::Exp, vec![u])),
-        FnTag::Log  => Some(pool.div(pool.one, u)),
+        FnTag::Log  => {
+            let one = pool.one;
+            Some(pool.div(one, u))
+        }
         FnTag::Sqrt => {
             // 1 / (2 * sqrt(u))
             let two = pool.small_int(2);
             let sqrt_u = pool.func(FnTag::Sqrt, vec![u]);
             let denom = pool.mul(vec![two, sqrt_u]);
-            Some(pool.div(pool.one, denom))
+            let one = pool.one;
+            Some(pool.div(one, denom))
         }
         FnTag::Asin => {
             // 1 / sqrt(1 - u^2)
-            let u2 = pool.pow(u, pool.small_int(2));
-            let one_minus_u2 = pool.add(vec![pool.one, pool.neg(u2)]);
+            let two_int = pool.small_int(2);
+            let u2 = pool.pow(u, two_int);
+            let neg_u2 = pool.neg(u2);
+            let one = pool.one;
+            let one_minus_u2 = pool.add(vec![one, neg_u2]);
             let sqrt = pool.func(FnTag::Sqrt, vec![one_minus_u2]);
-            Some(pool.div(pool.one, sqrt))
+            Some(pool.div(one, sqrt))
         }
         FnTag::Acos => {
             // -1 / sqrt(1 - u^2)
-            let u2 = pool.pow(u, pool.small_int(2));
-            let one_minus_u2 = pool.add(vec![pool.one, pool.neg(u2)]);
+            let two_int = pool.small_int(2);
+            let u2 = pool.pow(u, two_int);
+            let neg_u2 = pool.neg(u2);
+            let one = pool.one;
+            let one_minus_u2 = pool.add(vec![one, neg_u2]);
             let sqrt = pool.func(FnTag::Sqrt, vec![one_minus_u2]);
-            let pos = pool.div(pool.one, sqrt);
+            let pos = pool.div(one, sqrt);
             Some(pool.neg(pos))
         }
         FnTag::Atan => {
             // 1 / (1 + u^2)
-            let u2 = pool.pow(u, pool.small_int(2));
-            let denom = pool.add(vec![pool.one, u2]);
-            Some(pool.div(pool.one, denom))
+            let two_int = pool.small_int(2);
+            let u2 = pool.pow(u, two_int);
+            let one = pool.one;
+            let denom = pool.add(vec![one, u2]);
+            Some(pool.div(one, denom))
         }
         FnTag::Abs  => None, // placeholder — undefined at 0
         FnTag::Custom(_) => None,
@@ -5010,8 +5009,10 @@ pub fn diff_div(
     // (d_num * den - num * d_den) / den^2
     let t1 = pool.mul(vec![d_num, den]);
     let t2 = pool.mul(vec![num, d_den]);
-    let numerator = pool.add(vec![t1, pool.neg(t2)]);
-    let den_sq = pool.pow(den, pool.small_int(2));
+    let neg_t2 = pool.neg(t2);
+    let numerator = pool.add(vec![t1, neg_t2]);
+    let two_int = pool.small_int(2);
+    let den_sq = pool.pow(den, two_int);
     Ok(pool.div(numerator, den_sq))
 }
 
@@ -5031,7 +5032,9 @@ pub fn diff_pow(
             // d/dx base^n = n * base^(n-1) * d(base)/dx
             let d_base = crate::diff::driver::diff_impl(pool, base, var, cache)?;
             if pool.is_zero(d_base) { return Ok(pool.zero); }
-            let new_exp = pool.add(vec![exp, pool.neg(pool.one)]);
+            let one = pool.one;
+            let neg_one = pool.neg(one);
+            let new_exp = pool.add(vec![exp, neg_one]);
             let power = pool.pow(base, new_exp);
             Ok(pool.mul(vec![exp, power, d_base]))
         }
@@ -5040,7 +5043,8 @@ pub fn diff_pow(
             let d_exp = crate::diff::driver::diff_impl(pool, exp, var, cache)?;
             if pool.is_zero(d_exp) { return Ok(pool.zero); }
             let ln_base = pool.func(crate::expr::FnTag::Log, vec![base]);
-            Ok(pool.mul(vec![pool.pow(base, exp), ln_base, d_exp]))
+            let pow = pool.pow(base, exp);
+            Ok(pool.mul(vec![pow, ln_base, d_exp]))
         }
         (true, true) => {
             // d/dx f^g = f^g * (g' * ln(f) + g * f'/f)
@@ -5048,9 +5052,11 @@ pub fn diff_pow(
             let d_exp  = crate::diff::driver::diff_impl(pool, exp, var, cache)?;
             let ln_base = pool.func(crate::expr::FnTag::Log, vec![base]);
             let t1 = pool.mul(vec![d_exp, ln_base]);
-            let t2 = pool.mul(vec![exp, pool.div(d_base, base)]);
+            let inner_div = pool.div(d_base, base);
+            let t2 = pool.mul(vec![exp, inner_div]);
             let inner = pool.add(vec![t1, t2]);
-            Ok(pool.mul(vec![pool.pow(base, exp), inner]))
+            let pow = pool.pow(base, exp);
+            Ok(pool.mul(vec![pow, inner]))
         }
     }
 }
@@ -5244,15 +5250,16 @@ mod proptests {
         fn diff_linearity(a in 1i64..10, b in 1i64..10) {
             let mut pool = ExprPool::new();
             let x = pool.symbol("x");
-            let ax = pool.mul(vec![pool.small_int(a), x]);
-            let bx = pool.mul(vec![pool.small_int(b), x]);
+            let a_int = pool.small_int(a);
+            let b_int = pool.small_int(b);
+            let ax = pool.mul(vec![a_int, x]);
+            let bx = pool.mul(vec![b_int, x]);
             let sum = pool.add(vec![ax, bx]);
             // d/dx(a*x + b*x) should equal (a+b)
             let d = differentiate(&mut pool, sum, x).unwrap();
             let config = SimplifierConfig::default();
             let mut cache = SimplifyCache::new();
             let simplified = simplify(&mut pool, d, &config, &mut cache);
-            // The result contains a+b as a constant
             let total = a + b;
             let has_total = pool.fold(simplified, false, &mut |found, _id, node| {
                 found || matches!(node, crate::expr::ExprNode::SmallInt(n) if *n == total)
@@ -5265,9 +5272,9 @@ mod proptests {
             // d/dx(x^n) = n*x^(n-1)
             let mut pool = ExprPool::new();
             let x = pool.symbol("x");
-            let xn = pool.pow(x, pool.small_int(n as i64));
+            let n_int = pool.small_int(n as i64);
+            let xn = pool.pow(x, n_int);
             let d = differentiate(&mut pool, xn, x).unwrap();
-            // Result should contain n as coefficient
             let has_n = pool.fold(d, false, &mut |found, _id, node| {
                 found || matches!(node, crate::expr::ExprNode::SmallInt(k) if *k == n as i64)
             });
@@ -5288,9 +5295,10 @@ fn bench_diff_20_term_poly(c: &mut Criterion) {
         b.iter(|| {
             let mut pool = monomix_kernel::expr::ExprPool::new();
             let x = pool.symbol("x");
-            let terms: Vec<_> = (0..20).map(|i| {
+            let terms: Vec<_> = (0..20i64).map(|i| {
                 let coeff = pool.small_int(i + 1);
-                let power = pool.pow(x, pool.small_int(20 - i));
+                let exp_int = pool.small_int(20 - i);
+                let power = pool.pow(x, exp_int);
                 pool.mul(vec![coeff, power])
             }).collect();
             let poly = pool.add(terms);
@@ -5423,8 +5431,9 @@ mod tests {
     fn substitute_eq_componentwise() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
+        let one = pool.one;
         let two = pool.small_int(2);
-        let eq = pool.eq_node(x, pool.one);
+        let eq = pool.eq_node(x, one);
         let mut cache = SubstituteCache::default();
         let result = substitute(&mut pool, &mut cache, eq, x, two);
         assert!(matches!(pool.get(result), crate::expr::ExprNode::Eq(_, _)));
@@ -5592,9 +5601,11 @@ mod tests {
     #[test]
     fn eval_nan_errors() {
         let mut pool = ExprPool::new();
-        let x = pool.symbol("x");
-        // 0/0 would produce NaN via f64 arithmetic
-        let zero_div = pool.div(pool.zero, pool.zero);
+        let _x = pool.symbol("x");
+        // 0/0 would produce NaN via f64 arithmetic.
+        // Pool.div(0, 0) doesn't simplify; eval should hit IndeterminateForm.
+        let zero = pool.zero;
+        let zero_div = pool.div(zero, zero);
         let result = evaluate_numeric(&pool, &[], zero_div);
         // Div(0, 0) should hit indeterminate or NaN
         assert!(result.is_err());
@@ -5700,11 +5711,12 @@ fn eval_impl(
             Ok(n / d)
         }
         ExprNode::Fn(tag, args) => {
+            let tag = *tag;
             let arg_ids: Vec<ExprId> = args.to_vec();
-            eval_fn(pool, bindings, *tag, &arg_ids)
-        }
-        ExprNode::Fn(FnTag::Custom(name), _) => {
-            Err(KernelError::UnsupportedFn)
+            if matches!(tag, FnTag::Custom(_)) {
+                return Err(KernelError::UnsupportedFn);
+            }
+            eval_fn(pool, bindings, tag, &arg_ids)
         }
         _ => Err(KernelError::UnsupportedFn),
     }
@@ -5716,56 +5728,40 @@ fn eval_fn(
     tag: FnTag,
     args: &[ExprId],
 ) -> Result<f64, KernelError> {
+    if args.len() != 1 {
+        return Err(KernelError::UnsupportedFn);
+    }
+    let v = eval_impl(pool, bindings, args[0])?;
     match tag {
-        FnTag::Custom(_) => Err(KernelError::UnsupportedFn),
-        _ if args.len() != 1 => Err(KernelError::UnsupportedFn),
-        _ => {
-            let v = eval_impl(pool, bindings, args[0])?;
-            match tag {
-                FnTag::Sin  => Ok(v.sin()),
-                FnTag::Cos  => Ok(v.cos()),
-                FnTag::Tan  => Ok(v.tan()),
-                FnTag::Exp  => Ok(v.exp()),
-                FnTag::Log  => {
-                    if v <= 0.0 { return Err(KernelError::LogOfNonPositive); }
-                    Ok(v.ln())
-                }
-                FnTag::Sqrt => {
-                    if v < 0.0 { return Err(KernelError::SqrtOfNegative); }
-                    Ok(v.sqrt())
-                }
-                FnTag::Abs  => Ok(v.abs()),
-                FnTag::Asin => {
-                    if v < -1.0 || v > 1.0 {
-                        return Err(KernelError::DomainError { fn_name: "asin" });
-                    }
-                    Ok(v.asin())
-                }
-                FnTag::Acos => {
-                    if v < -1.0 || v > 1.0 {
-                        return Err(KernelError::DomainError { fn_name: "acos" });
-                    }
-                    Ok(v.acos())
-                }
-                FnTag::Atan => Ok(v.atan()),
-                FnTag::Custom(_) => Err(KernelError::UnsupportedFn),
-            }
+        FnTag::Sin  => Ok(v.sin()),
+        FnTag::Cos  => Ok(v.cos()),
+        FnTag::Tan  => Ok(v.tan()),
+        FnTag::Exp  => Ok(v.exp()),
+        FnTag::Log  => {
+            if v <= 0.0 { return Err(KernelError::LogOfNonPositive); }
+            Ok(v.ln())
         }
+        FnTag::Sqrt => {
+            if v < 0.0 { return Err(KernelError::SqrtOfNegative); }
+            Ok(v.sqrt())
+        }
+        FnTag::Abs  => Ok(v.abs()),
+        FnTag::Asin => {
+            if v < -1.0 || v > 1.0 {
+                return Err(KernelError::DomainError { fn_name: "asin" });
+            }
+            Ok(v.asin())
+        }
+        FnTag::Acos => {
+            if v < -1.0 || v > 1.0 {
+                return Err(KernelError::DomainError { fn_name: "acos" });
+            }
+            Ok(v.acos())
+        }
+        FnTag::Atan => Ok(v.atan()),
+        FnTag::Custom(_) => Err(KernelError::UnsupportedFn),
     }
 }
-```
-
-Fix the duplicate `Fn` arm in the match — the full `eval_impl` above has a logical issue. Replace the last two `Fn` arms with:
-```rust
-        ExprNode::Fn(tag, args) => {
-            let tag = *tag;
-            let arg_ids: Vec<ExprId> = args.to_vec();
-            if matches!(tag, FnTag::Custom(_)) {
-                return Err(KernelError::UnsupportedFn);
-            }
-            eval_fn(pool, bindings, tag, &arg_ids)
-        }
-        _ => Err(KernelError::UnsupportedFn),
 ```
 
 Add to `lib.rs`:
@@ -5811,10 +5807,11 @@ mod tests {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
         let three = pool.small_int(3);
+        let zero = pool.zero;
         // x - 3 = 0
         let neg3 = pool.neg(three);
         let expr = pool.add(vec![x, neg3]);
-        let eq = pool.eq_node(expr, pool.zero);
+        let eq = pool.eq_node(expr, zero);
         let result = solve(&mut pool, eq, x).unwrap();
         assert!(!result.has_complex_roots);
         assert_eq!(result.solutions.len(), 1);
@@ -5829,11 +5826,14 @@ mod tests {
     fn solve_quadratic_x_squared_minus_4() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
+        let zero = pool.zero;
         // x^2 - 4 = 0 → x = ±2
-        let x2 = pool.pow(x, pool.small_int(2));
-        let neg4 = pool.neg(pool.small_int(4));
+        let two_int = pool.small_int(2);
+        let x2 = pool.pow(x, two_int);
+        let four = pool.small_int(4);
+        let neg4 = pool.neg(four);
         let poly = pool.add(vec![x2, neg4]);
-        let eq = pool.eq_node(poly, pool.zero);
+        let eq = pool.eq_node(poly, zero);
         let result = solve(&mut pool, eq, x).unwrap();
         assert!(!result.has_complex_roots);
         assert_eq!(result.solutions.len(), 2);
@@ -5843,10 +5843,13 @@ mod tests {
     fn solve_quadratic_complex_roots() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
+        let one = pool.one;
+        let zero = pool.zero;
         // x^2 + 1 = 0 → complex roots
-        let x2 = pool.pow(x, pool.small_int(2));
-        let poly = pool.add(vec![x2, pool.one]);
-        let eq = pool.eq_node(poly, pool.zero);
+        let two_int = pool.small_int(2);
+        let x2 = pool.pow(x, two_int);
+        let poly = pool.add(vec![x2, one]);
+        let eq = pool.eq_node(poly, zero);
         let result = solve(&mut pool, eq, x).unwrap();
         assert!(result.has_complex_roots);
         assert!(result.solutions.is_empty());
@@ -5856,9 +5859,11 @@ mod tests {
     fn solve_unsupported_cubic_errors() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
+        let one = pool.one;
         // x^3 - 1 = 0 → UnsupportedEquation
-        let x3 = pool.pow(x, pool.small_int(3));
-        let eq = pool.eq_node(x3, pool.one);
+        let three_int = pool.small_int(3);
+        let x3 = pool.pow(x, three_int);
+        let eq = pool.eq_node(x3, one);
         let result = solve(&mut pool, eq, x);
         assert!(matches!(result, Err(KernelError::UnsupportedEquation { .. })));
     }
@@ -5965,10 +5970,12 @@ fn solve_quadratic(
     let mut cache = SimplifyCache::new();
 
     // discriminant = b^2 - 4*a*c
-    let b2 = pool.pow(b, pool.small_int(2));
+    let two_int = pool.small_int(2);
+    let b2 = pool.pow(b, two_int);
     let four = pool.small_int(4);
     let four_ac = pool.mul(vec![four, a, c]);
-    let discriminant = pool.add(vec![b2, pool.neg(four_ac)]);
+    let neg_four_ac = pool.neg(four_ac);
+    let discriminant = pool.add(vec![b2, neg_four_ac]);
     let disc_simplified = simplify(pool, discriminant, &config, &mut cache);
 
     // Check sign of discriminant (only for numeric discriminants)
@@ -5978,8 +5985,10 @@ fn solve_quadratic(
         }
         if disc_val == 0.0 {
             // One root: x = -b / (2a)
-            let two_a = pool.mul(vec![pool.small_int(2), a]);
-            let val = pool.div(pool.neg(b), two_a);
+            let two_int2 = pool.small_int(2);
+            let two_a = pool.mul(vec![two_int2, a]);
+            let neg_b_local = pool.neg(b);
+            let val = pool.div(neg_b_local, two_a);
             let s = simplify(pool, val, &config, &mut cache);
             return Ok(SolutionSet {
                 solutions: vec![vec![(var, s)], vec![(var, s)]],
@@ -5990,14 +5999,17 @@ fn solve_quadratic(
 
     // Two roots: x = (-b ± sqrt(disc)) / (2a)
     let sqrt_disc = pool.func(crate::expr::FnTag::Sqrt, vec![disc_simplified]);
-    let two_a = pool.mul(vec![pool.small_int(2), a]);
+    let two_int3 = pool.small_int(2);
+    let two_a = pool.mul(vec![two_int3, a]);
     let neg_b = pool.neg(b);
 
     let root1_num = pool.add(vec![neg_b, sqrt_disc]);
     let root1 = pool.div(root1_num, two_a);
     let root1 = simplify(pool, root1, &config, &mut cache);
 
-    let root2_num = pool.add(vec![pool.neg(b), pool.neg(sqrt_disc)]);
+    let neg_b2 = pool.neg(b);
+    let neg_sqrt_disc = pool.neg(sqrt_disc);
+    let root2_num = pool.add(vec![neg_b2, neg_sqrt_disc]);
     let root2 = pool.div(root2_num, two_a);
     let root2 = simplify(pool, root2, &config, &mut cache);
 
@@ -6015,55 +6027,82 @@ fn try_to_f64(pool: &ExprPool, expr: ExprId) -> Option<f64> {
     }
 }
 
-/// Solve a linear system of n equations in n unknowns via Gaussian elimination.
-/// `equations`: Vec of Eq(lhs, rhs) nodes; `vars`: the n unknowns.
+/// Solve a linear n×n system of equations (numeric coefficients only) via
+/// Gaussian elimination with partial pivoting.
+///
+/// Each equation must be `Eq(lhs, rhs)` (or a bare expression treated as
+/// `expr = 0`). For each equation `E`, we extract row `[a_1 ... a_n | b]` by
+/// numeric evaluation:
+///   - `a_j` = ∂E/∂x_j evaluated with all variables = 0 — i.e. evaluate
+///     `(E[x_j ← 1, others ← 0]) − (E[all ← 0])` after moving rhs.
+///   - `b` = `-E[all ← 0]` (constant term moved to RHS).
+///
+/// Phase 1 limitation: coefficients must be numeric (BigInt / Rational /
+/// Float). Symbolic coefficients return `UnsupportedEquation`. Multivariate
+/// polynomial coefficient extraction is deferred to Phase 2.
 pub fn solve_system(
     pool: &mut ExprPool,
     equations: &[ExprId],
     vars: &[ExprId],
 ) -> Result<SolutionSet, KernelError> {
+    use crate::evalnum::evaluate_numeric;
+    use crate::substitute::substitute_many_fresh;
+
     let n = vars.len();
     if equations.len() != n {
         return Err(KernelError::UnsupportedEquation {
             reason: "number of equations must equal number of unknowns".to_string(),
         });
     }
-    // Build augmented matrix of f64 coefficients
-    let mut mat: Vec<Vec<f64>> = Vec::new();
+
+    // Pre-compute "all variables = 0.0" bindings for the constant column.
+    let zero_bindings: Vec<(ExprId, f64)> =
+        vars.iter().map(|&v| (v, 0.0)).collect();
+
+    let mut mat: Vec<Vec<f64>> = Vec::with_capacity(n);
     for &eq in equations {
         let (lhs, rhs) = match pool.get(eq) {
             ExprNode::Eq(l, r) => (*l, *r),
-            _ => (eq, pool.zero),
+            _ => {
+                let z = pool.zero;
+                (eq, z)
+            }
         };
         let rhs_neg = pool.neg(rhs);
         let poly_expr = pool.add(vec![lhs, rhs_neg]);
-        let mut row = Vec::new();
-        for &var in vars {
-            let c = coeff(pool, poly_expr, var, 1);
-            let val = match pool.get(c) {
-                ExprNode::SmallInt(n) => *n as f64,
-                ExprNode::Float(f) => f.0,
-                _ => return Err(KernelError::UnsupportedEquation {
+
+        // Constant term b = E(0, 0, ..., 0)
+        let const_val = evaluate_numeric(pool, &zero_bindings, poly_expr)
+            .map_err(|_| KernelError::UnsupportedEquation {
+                reason: "non-numeric coefficient in linear system".to_string(),
+            })?;
+
+        // For each unknown, coefficient a_j = E(e_j) - const
+        // where e_j has x_j = 1, others = 0.
+        let mut row = Vec::with_capacity(n + 1);
+        for j in 0..n {
+            let mut bj = zero_bindings.clone();
+            bj[j].1 = 1.0;
+            let ej = evaluate_numeric(pool, &bj, poly_expr)
+                .map_err(|_| KernelError::UnsupportedEquation {
                     reason: "non-numeric coefficient in linear system".to_string(),
-                }),
-            };
-            row.push(val);
+                })?;
+            row.push(ej - const_val);
         }
-        let rhs_const = coeff(pool, poly_expr, vars[0], 0); // placeholder
-        // Constant term
-        let const_val = match pool.get(rhs_const) {
-            ExprNode::SmallInt(n) => *n as f64,
-            _ => 0.0,
-        };
-        row.push(-const_val); // augmented column
+        row.push(-const_val); // augmented RHS column
         mat.push(row);
     }
-    // Gaussian elimination with partial pivoting
+
+    // Gaussian elimination with partial pivoting.
     for col in 0..n {
-        // Find pivot
-        let pivot_row = (col..n)
-            .max_by(|&a, &b| mat[a][col].abs().partial_cmp(&mat[b][col].abs()).unwrap_or(std::cmp::Ordering::Equal));
-        let pivot_row = pivot_row.ok_or(KernelError::SingularSystem)?;
+        let mut pivot_row = col;
+        let mut best = mat[col][col].abs();
+        for r in (col + 1)..n {
+            if mat[r][col].abs() > best {
+                pivot_row = r;
+                best = mat[r][col].abs();
+            }
+        }
         mat.swap(col, pivot_row);
         let pivot = mat[col][col];
         if pivot.abs() < 1e-12 {
@@ -6077,18 +6116,22 @@ pub fn solve_system(
             }
         }
     }
-    // Back substitution
+
+    // Back substitution.
     let mut solution = vec![0.0f64; n];
     for i in (0..n).rev() {
-        solution[i] = mat[i][n];
+        let mut s = mat[i][n];
         for j in (i + 1)..n {
-            solution[i] -= mat[i][j] * solution[j];
+            s -= mat[i][j] * solution[j];
         }
-        solution[i] /= mat[i][i];
+        solution[i] = s / mat[i][i];
     }
-    let binding: Substitution = vars.iter().zip(solution.iter()).map(|(&var, &val)| {
-        (var, pool.float(val))
-    }).collect();
+
+    let binding: Substitution = vars
+        .iter()
+        .zip(solution.iter())
+        .map(|(&var, &val)| (var, pool.float(val)))
+        .collect();
     Ok(SolutionSet {
         solutions: vec![binding],
         has_complex_roots: false,
@@ -6140,8 +6183,10 @@ mod proptests {
         fn simplify_idempotent_arbitrary(n in 1i64..100, m in 1i64..100) {
             let mut pool = ExprPool::new();
             let x = pool.symbol("x");
-            let nx = pool.mul(vec![pool.small_int(n), x]);
-            let mx = pool.mul(vec![pool.small_int(m), x]);
+            let n_int = pool.small_int(n);
+            let m_int = pool.small_int(m);
+            let nx = pool.mul(vec![n_int, x]);
+            let mx = pool.mul(vec![m_int, x]);
             let expr = pool.add(vec![nx, mx]);
             let config = SimplifierConfig::default();
             let mut cache = SimplifyCache::new();
@@ -6154,10 +6199,11 @@ mod proptests {
         fn simplify_iters_at_most_2(n in 1i64..20, m in 1i64..20) {
             let mut pool = ExprPool::new();
             let x = pool.symbol("x");
-            let nx = pool.mul(vec![pool.small_int(n), x]);
-            let mx = pool.mul(vec![pool.small_int(m), x]);
+            let n_int = pool.small_int(n);
+            let m_int = pool.small_int(m);
+            let nx = pool.mul(vec![n_int, x]);
+            let mx = pool.mul(vec![m_int, x]);
             let expr = pool.add(vec![nx, mx]);
-            // Manually count iterations
             let config = SimplifierConfig::default();
             let mut cache = SimplifyCache::new();
             let mut iters = 0u32;
@@ -6179,17 +6225,8 @@ mod proptests {
 }
 ```
 
-Note: `simplify_node_public` needs to be exposed for the test. Add to `driver.rs`:
-```rust
-pub fn simplify_node_public(
-    pool: &mut ExprPool,
-    expr: ExprId,
-    config: &SimplifierConfig,
-    cache: &mut SimplifyCache,
-) -> ExprId {
-    simplify_node(pool, expr, config, cache, &crate::simplify::rules::DEFAULT_RULES)
-}
-```
+Note: `simplify_node_public` was already exposed in `driver.rs` during
+Task 20; this proptest just consumes it.
 
 - [ ] **Step 2: Add simplify benchmark**
 
@@ -6205,7 +6242,8 @@ fn bench_simplify_50_term_sum(c: &mut Criterion) {
             let x = pool.symbol("x");
             // Build 50 terms: i*x for i in 1..=50, then simplify
             let terms: Vec<_> = (1i64..=50).map(|i| {
-                pool.mul(vec![pool.small_int(i), x])
+                let coeff = pool.small_int(i);
+                pool.mul(vec![coeff, x])
             }).collect();
             let expr = pool.add(terms);
             let config = SimplifierConfig::default();
@@ -6280,12 +6318,15 @@ mod proptests {
             // (x - p)(x - q) = x^2 - (p+q)x + pq = 0, roots are p and q
             let mut pool = ExprPool::new();
             let x = pool.symbol("x");
+            let zero = pool.zero;
             let sum = pool.small_int(p + q);
             let prod = pool.small_int(p * q);
-            let x2 = pool.pow(x, pool.small_int(2));
-            let neg_sum_x = pool.mul(vec![pool.neg(sum), x]);
+            let two_int = pool.small_int(2);
+            let x2 = pool.pow(x, two_int);
+            let neg_sum = pool.neg(sum);
+            let neg_sum_x = pool.mul(vec![neg_sum, x]);
             let poly = pool.add(vec![x2, neg_sum_x, prod]);
-            let eq = pool.eq_node(poly, pool.zero);
+            let eq = pool.eq_node(poly, zero);
             let result = solve(&mut pool, eq, x).unwrap();
             prop_assert!(!result.has_complex_roots);
             prop_assert_eq!(result.solutions.len(), 2);
@@ -6306,11 +6347,15 @@ fn bench_solve_quadratic(c: &mut Criterion) {
         b.iter(|| {
             let mut pool = monomix_kernel::expr::ExprPool::new();
             let x = pool.symbol("x");
-            let x2 = pool.pow(x, pool.small_int(2));
-            let neg5x = pool.mul(vec![pool.neg(pool.small_int(5)), x]);
+            let zero = pool.zero;
+            let two_int = pool.small_int(2);
+            let x2 = pool.pow(x, two_int);
+            let five = pool.small_int(5);
+            let neg5 = pool.neg(five);
+            let neg5x = pool.mul(vec![neg5, x]);
             let six = pool.small_int(6);
             let poly = pool.add(vec![x2, neg5x, six]);
-            let eq = pool.eq_node(poly, pool.zero);
+            let eq = pool.eq_node(poly, zero);
             black_box(solve(&mut pool, eq, x).unwrap());
         });
     });

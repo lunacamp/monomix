@@ -74,6 +74,7 @@ authors.workspace    = true
 
 [dependencies]
 num-bigint    = "0.4"
+num-integer   = "0.1"
 num-rational  = "0.4"
 num-traits    = "0.2"
 rustc-hash    = "1"
@@ -81,10 +82,13 @@ indexmap      = "2"
 ordered-float = "4"
 arrayvec      = "0.7"
 smallvec      = { version = "1", features = ["union"] }
+thiserror     = "1"
 
 [dev-dependencies]
 proptest   = "1"
 criterion  = { version = "0.5", features = ["html_reports"] }
+serde      = { version = "1", features = ["derive"] }
+toml       = "0.8"
 
 [[bench]]
 name    = "kernel"
