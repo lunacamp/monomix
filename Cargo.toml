@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members  = ["rust/solver-bridge"]
+
+# Shared metadata inherited by member crates via `field.workspace = true`.
+# Add new crates (e.g. the kernel) under `members` as they appear.
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Roman Korneev"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

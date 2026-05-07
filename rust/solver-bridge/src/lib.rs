@@ -4,7 +4,7 @@
 //! out in `Cargo.toml`; the types here exist so the kernel-side API is
 //! pinned down and reviewed before we link the C library.
 //!
-//! Design parallels `monomix/python/monomix/solver/`:
+//! Design parallels `python/monomix/solver/`:
 //!
 //! - `Translator` caches Z3 declarations for kernel symbols.
 //! - `Backend` owns a single `z3::Solver` and exposes `assume`, `prove`,
