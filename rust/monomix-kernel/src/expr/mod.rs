@@ -658,4 +658,112 @@ mod tests {
         let result = pool.map_bottom_up_fresh(expr, &mut |_pool, id| id);
         assert_eq!(result, expr);
     }
+
+    #[test]
+    fn mul_zero_short_circuits() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let zero = pool.zero;
+        assert_eq!(pool.mul(vec![x, zero]), zero);
+    }
+
+    #[test]
+    fn mul_flattens() {
+        let mut pool = ExprPool::new();
+        let a = pool.symbol("a");
+        let b = pool.symbol("b");
+        let c = pool.symbol("c");
+        let ab = pool.mul(vec![a, b]);
+        let abc = pool.mul(vec![ab, c]);
+        let expected = pool.mul(vec![a, b, c]);
+        assert_eq!(abc, expected);
+    }
+
+    #[test]
+    fn rational_negative_denominator_normalized() {
+        let mut pool = ExprPool::new();
+        let r = pool.rational(num_bigint::BigInt::from(-2), num_bigint::BigInt::from(-3));
+        // -2/-3 = 2/3
+        if let ExprNode::Rational(b) = pool.get(r) {
+            assert_eq!(b.0, num_bigint::BigInt::from(2));
+            assert_eq!(b.1, num_bigint::BigInt::from(3));
+        } else {
+            panic!("expected Rational");
+        }
+    }
+
+    #[test]
+    fn rational_integer_shortcut() {
+        let mut pool = ExprPool::new();
+        let r = pool.rational(num_bigint::BigInt::from(6), num_bigint::BigInt::from(2));
+        assert_eq!(r, pool.small_int(3));
+    }
+
+    #[test]
+    fn subtree_size_atom_is_one() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        assert_eq!(pool.subtree_size(x), 1);
+    }
+
+    #[test]
+    fn subtree_size_add() {
+        let mut pool = ExprPool::new();
+        let a = pool.symbol("a");
+        let b = pool.symbol("b");
+        let sum = pool.add(vec![a, b]);
+        assert_eq!(pool.subtree_size(sum), 3); // Add + 2 children
+    }
+
+    #[test]
+    fn string_interning_roundtrip() {
+        let mut pool = ExprPool::new();
+        let id = pool.symbol("hello");
+        if let ExprNode::Symbol(s) = pool.get(id) {
+            assert_eq!(pool.str_of(*s), "hello");
+        } else {
+            panic!("expected Symbol");
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn intern_idempotent(n in -1000i64..1000i64) {
+            let mut pool = ExprPool::new();
+            let a = pool.small_int(n);
+            let b = pool.small_int(n);
+            prop_assert_eq!(a, b);
+        }
+
+        #[test]
+        fn add_commutative(a in 0u32..50, b in 0u32..50) {
+            let mut pool = ExprPool::new();
+            let x = pool.small_int(a as i64);
+            let y = pool.small_int(b as i64);
+            prop_assert_eq!(pool.add(vec![x, y]), pool.add(vec![y, x]));
+        }
+
+        #[test]
+        fn mul_commutative(a in 1u32..50, b in 1u32..50) {
+            let mut pool = ExprPool::new();
+            let x = pool.small_int(a as i64);
+            let y = pool.small_int(b as i64);
+            prop_assert_eq!(pool.mul(vec![x, y]), pool.mul(vec![y, x]));
+        }
+
+        #[test]
+        fn no_collision_distinct_ints(a in -500i64..500i64, b in -500i64..500i64) {
+            if a == b { return Ok(()); }
+            let mut pool = ExprPool::new();
+            let id_a = pool.small_int(a);
+            let id_b = pool.small_int(b);
+            prop_assert_ne!(id_a, id_b);
+        }
+    }
 }
