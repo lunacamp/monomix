@@ -328,6 +328,16 @@ impl ExprPool {
         self.intern(ExprNode::Fn(tag, args.into_boxed_slice()))
     }
 
+    /// Build a `Fn(Custom(...), ...)` node from a string name.
+    ///
+    /// Caller MUST ensure `name` is not a built-in function name. The parser
+    /// dispatches built-ins (`sin`, `cos`, `tan`, `exp`, `log`, `sqrt`, `abs`,
+    /// `asin`, `acos`, `atan`) to the proper `FnTag` variants via its
+    /// `BuiltinIds` lookup; passing a built-in name through this method would
+    /// create a `Custom(intern(name))` node that does NOT compare equal to
+    /// the corresponding `FnTag::Sin` / `FnTag::Cos` / etc.
+    ///
+    /// For built-ins, use `func(FnTag::Sin, args)` directly.
     pub fn func_named(&mut self, name: &str, args: Vec<ExprId>) -> ExprId {
         let s = self.intern_str(name);
         self.func(FnTag::Custom(s), args)
