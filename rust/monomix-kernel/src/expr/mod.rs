@@ -53,11 +53,13 @@ pub enum ExprNode {
     List(Box<[ExprId]>),
 }
 
-// Compile-time size guard — fails compilation if ExprNode size drifts.
-// The runtime test (below) enforces the upper bound (<=32 bytes); this
-// constant pins the *exact* current size so any future variant growth
-// (or unintended shrink) is caught at build time.
-const _EXPR_NODE_SIZE_GUARD: [(); 24] = [(); std::mem::size_of::<ExprNode>()];
+// Compile-time size guard — fails compilation if ExprNode exceeds the
+// 32-byte budget. Matches the runtime test (below) and the spec's
+// documented intent (<=32 bytes, not pinned to an exact size).
+const _EXPR_NODE_SIZE_GUARD: () = assert!(
+    std::mem::size_of::<ExprNode>() <= 32,
+    "ExprNode must be <=32 bytes",
+);
 
 #[cfg(test)]
 mod tests {
