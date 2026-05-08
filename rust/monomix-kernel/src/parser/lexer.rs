@@ -74,8 +74,14 @@ impl<'s> Lexer<'s> {
         self.peek().0.kind()
     }
 
-    /// Look at slot `offset` (0 or 1), filling intermediate slots.
+    /// Look at slot `offset` (0 or 1), filling intermediate slots as needed.
+    ///
+    /// **Precondition:** `offset <= 1`. The lookahead buffer has only two
+    /// slots; `peek_at(2)` would panic inside `ArrayVec::push`. The only
+    /// caller in this kernel is the assignment-detection check in the
+    /// statement parser, which uses `offset == 1`.
     pub fn peek_at(&mut self, offset: usize) -> &(Token, Span) {
+        debug_assert!(offset <= 1, "Lexer lookahead is 2 slots; offset must be 0 or 1");
         while self.buffer.len() <= offset {
             let tok = self.scan_next();
             self.buffer.push(tok);
