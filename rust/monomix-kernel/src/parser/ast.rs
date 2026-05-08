@@ -23,6 +23,8 @@ pub enum DiagnosticCode {
     InvalidNumericLiteral,
     NumericLiteralTooLong,
     IdentifierTooLong,
+    UnrecognizedCharacter,
+    ExpectedAssignAfterColon,
     MissingArgument { function: &'static str },
     TooManyArguments { function: &'static str, max: usize },
 }
@@ -33,7 +35,7 @@ pub enum TokenKind {
     SmallInt, BigInt, Float, Ident,
     Plus, Minus, Star, Slash, Pow,
     Assign, Equals, Comma, LParen, RParen,
-    Semi, Dollar, KwComment, Eof,
+    Semi, Dollar, KwComment, Invalid, Eof,
 }
 
 impl Span {

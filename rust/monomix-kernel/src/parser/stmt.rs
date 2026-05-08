@@ -6,12 +6,17 @@ impl<'s, 'p> ExprParser<'s, 'p> {
     pub(crate) fn parse_program(&mut self) -> Vec<Stmt> {
         let mut stmts = Vec::new();
         loop {
-            if self.lexer.peek_kind() == TokenKind::Eof { break; }
-            // Skip `comment ... ;` blocks
-            if self.lexer.peek_kind() == TokenKind::KwComment {
-                self.lexer.next();
-                self.skip_to_terminator();
-                continue;
+            match self.lexer.peek_kind() {
+                TokenKind::Eof => break,
+                // Lexer already emitted a diagnostic; consume and continue
+                // so a single bad byte doesn't terminate parsing.
+                TokenKind::Invalid => { self.lexer.next(); continue; }
+                TokenKind::KwComment => {
+                    self.lexer.next();
+                    self.skip_to_terminator();
+                    continue;
+                }
+                _ => {}
             }
             if let Some(stmt) = self.parse_stmt() {
                 stmts.push(stmt);
@@ -77,6 +82,12 @@ impl<'s, 'p> ExprParser<'s, 'p> {
                 Some((OutputMode::Suppress, span))
             }
             TokenKind::Eof => Some((OutputMode::Display, Span::SYNTHETIC)),
+            // `Invalid` already carries a lex-time diagnostic; recover
+            // without piling on a redundant "expected ';' or '$'".
+            TokenKind::Invalid => {
+                self.synchronise();
+                None
+            }
             _ => {
                 let (_tok, span) = self.lexer.next();
                 self.diagnostics.push(Diagnostic {

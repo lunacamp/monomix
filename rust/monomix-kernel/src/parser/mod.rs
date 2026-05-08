@@ -32,9 +32,14 @@ pub fn parse(source: &str, pool: &mut ExprPool) -> ParseResult {
         builtins,
     };
     let statements = parser.parse_program();
+    // Merge lex diagnostics with parser diagnostics, then sort by span start
+    // so the user sees errors in source order regardless of which layer emitted.
+    let mut diagnostics = parser.lexer.diagnostics;
+    diagnostics.append(&mut parser.diagnostics);
+    diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
     ParseResult {
         statements,
-        diagnostics: parser.diagnostics,
+        diagnostics,
         span_map: parser.span_map,
     }
 }
@@ -99,6 +104,43 @@ mod tests {
         // The malformed first stmt produces >=1 diagnostic; the second parses.
         assert!(!result.diagnostics.is_empty());
         assert_eq!(result.statements.len(), 1);
+    }
+
+    #[test]
+    fn parse_unrecognized_char_does_not_truncate_program() {
+        // Regression: the lexer used to fabricate Eof for unrecognized bytes,
+        // silently dropping every statement that followed.
+        let mut pool = ExprPool::new();
+        let result = parse("? 1 + 2; 3 + 4;", &mut pool);
+        assert_eq!(result.statements.len(), 2, "trailing statements must still parse");
+        assert!(
+            result.diagnostics.iter().any(|d| matches!(
+                d.code,
+                crate::parser::ast::DiagnosticCode::UnrecognizedCharacter
+            )),
+            "expected an UnrecognizedCharacter diagnostic"
+        );
+    }
+
+    #[test]
+    fn parse_bare_colon_does_not_truncate_program() {
+        // Regression: typo `:` (instead of `:=`) used to swallow the rest of input.
+        let mut pool = ExprPool::new();
+        let result = parse("x : 1; y := 2;", &mut pool);
+        assert!(
+            result.statements.iter().any(|s| matches!(
+                s.kind,
+                crate::parser::ast::StmtKind::Assign { .. }
+            )),
+            "the `y := 2` statement after the malformed colon must still parse"
+        );
+        assert!(
+            result.diagnostics.iter().any(|d| matches!(
+                d.code,
+                crate::parser::ast::DiagnosticCode::ExpectedAssignAfterColon
+            )),
+            "expected an ExpectedAssignAfterColon diagnostic"
+        );
     }
 }
 

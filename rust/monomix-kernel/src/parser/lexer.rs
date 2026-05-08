@@ -1,6 +1,6 @@
 use arrayvec::ArrayVec;
 use num_bigint::BigInt;
-use crate::parser::ast::{Span, TokenKind};
+use crate::parser::ast::{Diagnostic, DiagnosticCode, Severity, Span, TokenKind};
 
 // ---- Tokens ----------------------------------------------------------------
 
@@ -18,6 +18,7 @@ pub enum Token {
     Comma, LParen, RParen,
     Semi, Dollar,
     KwComment,
+    Invalid,   // lex error; lexer has already pushed a Diagnostic
     Eof,
 }
 
@@ -41,6 +42,7 @@ impl Token {
             Token::Semi        => TokenKind::Semi,
             Token::Dollar      => TokenKind::Dollar,
             Token::KwComment   => TokenKind::KwComment,
+            Token::Invalid     => TokenKind::Invalid,
             Token::Eof         => TokenKind::Eof,
         }
     }
@@ -54,11 +56,23 @@ pub struct Lexer<'s> {
     /// Two-slot lookahead. Slot 0 is the next token; slot 1 the after-next.
     /// Fed lazily on `peek_at(1)` calls.
     buffer: ArrayVec<(Token, Span), 2>,
+    /// Diagnostics emitted during scanning. Drained by the parser.
+    /// Every `Token::Invalid` produced by the lexer has a corresponding entry here.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl<'s> Lexer<'s> {
     pub fn new(src: &'s str) -> Self {
-        Lexer { src, pos: 0, buffer: ArrayVec::new() }
+        Lexer { src, pos: 0, buffer: ArrayVec::new(), diagnostics: Vec::new() }
+    }
+
+    fn push_diag(&mut self, span: Span, code: DiagnosticCode, message: String) {
+        self.diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            span,
+            message,
+            code,
+        });
     }
 
     pub fn peek(&mut self) -> &(Token, Span) {
@@ -155,17 +169,35 @@ impl<'s> Lexer<'s> {
                     (Token::Assign, Span::of(start, self.pos))
                 } else {
                     self.pos += 1;
-                    (Token::Eof, Span::of(start, self.pos))
+                    let span = Span::of(start, self.pos);
+                    self.push_diag(
+                        span,
+                        DiagnosticCode::ExpectedAssignAfterColon,
+                        "expected '=' after ':' (use ':=' for assignment)".to_string(),
+                    );
+                    (Token::Invalid, span)
                 }
             }
             b'0'..=b'9' => self.scan_number(start),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.scan_ident(start),
             _ => {
-                self.pos += 1;
-                (Token::Eof, Span::of(start, self.pos))
+                // Step over one full UTF-8 code point so we don't slice mid-char.
+                let ch_len = utf8_char_len(b);
+                let ch_end = (self.pos + ch_len).min(self.src.len());
+                let bad = &self.src[self.pos..ch_end];
+                self.pos = ch_end;
+                let span = Span::of(start, self.pos);
+                self.push_diag(
+                    span,
+                    DiagnosticCode::UnrecognizedCharacter,
+                    format!("unrecognized character {:?}", bad),
+                );
+                (Token::Invalid, span)
             }
         }
     }
+
+
 
     fn scan_number(&mut self, start: usize) -> (Token, Span) {
         let src = self.src;
@@ -199,26 +231,50 @@ impl<'s> Lexer<'s> {
             let span = Span::of(start, self.pos);
             // 1024-byte cap on numeric literals
             if self.pos - start > 1024 {
-                return (Token::Eof, span);
+                self.push_diag(
+                    span,
+                    DiagnosticCode::NumericLiteralTooLong,
+                    "numeric literal exceeds 1024 bytes".to_string(),
+                );
+                return (Token::Invalid, span);
             }
             let s = &src[start..self.pos];
             match s.parse::<f64>() {
                 Ok(f) if f.is_finite() => (Token::Float(f), span),
                 // Reject inf / nan / overflow at lex time — never propagate
                 // these into the kernel.
-                Ok(_) | Err(_) => (Token::Eof, span),
+                Ok(_) | Err(_) => {
+                    self.push_diag(
+                        span,
+                        DiagnosticCode::InvalidNumericLiteral,
+                        "invalid float literal (overflow, NaN, or malformed)".to_string(),
+                    );
+                    (Token::Invalid, span)
+                }
             }
         } else {
             let span = Span::of(start, self.pos);
             if self.pos - start > 1024 {
-                return (Token::Eof, span);
+                self.push_diag(
+                    span,
+                    DiagnosticCode::NumericLiteralTooLong,
+                    "numeric literal exceeds 1024 bytes".to_string(),
+                );
+                return (Token::Invalid, span);
             }
             let s = &src[start..self.pos];
             match s.parse::<i64>() {
                 Ok(n) => (Token::SmallInt(n), span),
                 Err(_) => match s.parse::<BigInt>() {
                     Ok(n) => (Token::BigInt(Box::new(n)), span),
-                    Err(_) => (Token::Eof, span),
+                    Err(_) => {
+                        self.push_diag(
+                            span,
+                            DiagnosticCode::InvalidNumericLiteral,
+                            "invalid integer literal".to_string(),
+                        );
+                        (Token::Invalid, span)
+                    }
                 },
             }
         }
@@ -236,7 +292,12 @@ impl<'s> Lexer<'s> {
         let span = Span::of(start, self.pos);
         // 1024-byte cap on identifier length
         if self.pos - start > 1024 {
-            return (Token::Eof, span);
+            self.push_diag(
+                span,
+                DiagnosticCode::IdentifierTooLong,
+                "identifier exceeds 1024 bytes".to_string(),
+            );
+            return (Token::Invalid, span);
         }
         let word = &self.src[start..self.pos];
         // `comment` keyword is case-insensitive
@@ -245,6 +306,17 @@ impl<'s> Lexer<'s> {
         }
         (Token::Ident(span), span)
     }
+}
+
+/// UTF-8 leading-byte width. Returns 1..=4 for valid leads, 1 as a safe
+/// fallback for stray continuation bytes (we still advance one byte so
+/// scanning makes progress).
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 { 1 }
+    else if b < 0xC0 { 1 }      // stray continuation byte
+    else if b < 0xE0 { 2 }
+    else if b < 0xF0 { 3 }
+    else { 4 }
 }
 
 #[cfg(test)]
@@ -318,5 +390,64 @@ mod tests {
         assert_eq!(lexer.peek_kind(), TokenKind::SmallInt); // idempotent
         lexer.next(); // consume
         assert_eq!(lexer.peek_kind(), TokenKind::Plus);
+    }
+
+    #[test]
+    fn lex_unrecognized_char_is_invalid_not_eof() {
+        // Previously these collapsed to Eof and silently truncated parsing.
+        let mut lexer = Lexer::new("1 ? 2");
+        assert_eq!(lexer.next().0.kind(), TokenKind::SmallInt);
+        assert_eq!(lexer.next().0.kind(), TokenKind::Invalid);
+        assert_eq!(lexer.next().0.kind(), TokenKind::SmallInt);
+        assert_eq!(lexer.next().0.kind(), TokenKind::Eof);
+        assert_eq!(lexer.diagnostics.len(), 1);
+        assert!(matches!(
+            lexer.diagnostics[0].code,
+            DiagnosticCode::UnrecognizedCharacter
+        ));
+    }
+
+    #[test]
+    fn lex_bare_colon_is_invalid_not_eof() {
+        let mut lexer = Lexer::new("x : 1");
+        assert_eq!(lexer.next().0.kind(), TokenKind::Ident);
+        assert_eq!(lexer.next().0.kind(), TokenKind::Invalid);
+        assert_eq!(lexer.next().0.kind(), TokenKind::SmallInt);
+        assert_eq!(lexer.next().0.kind(), TokenKind::Eof);
+        assert!(matches!(
+            lexer.diagnostics[0].code,
+            DiagnosticCode::ExpectedAssignAfterColon
+        ));
+    }
+
+    #[test]
+    fn lex_oversized_number_emits_diagnostic() {
+        let huge = "1".repeat(2000);
+        let mut lexer = Lexer::new(&huge);
+        assert_eq!(lexer.next().0.kind(), TokenKind::Invalid);
+        assert!(matches!(
+            lexer.diagnostics[0].code,
+            DiagnosticCode::NumericLiteralTooLong
+        ));
+    }
+
+    #[test]
+    fn lex_oversized_identifier_emits_diagnostic() {
+        let huge = "a".repeat(2000);
+        let mut lexer = Lexer::new(&huge);
+        assert_eq!(lexer.next().0.kind(), TokenKind::Invalid);
+        assert!(matches!(
+            lexer.diagnostics[0].code,
+            DiagnosticCode::IdentifierTooLong
+        ));
+    }
+
+    #[test]
+    fn lex_non_ascii_char_advances_full_codepoint() {
+        // U+00E9 (é) is two bytes in UTF-8; we must not slice between them.
+        let mut lexer = Lexer::new("é+1");
+        assert_eq!(lexer.next().0.kind(), TokenKind::Invalid);
+        assert_eq!(lexer.next().0.kind(), TokenKind::Plus);
+        assert_eq!(lexer.next().0.kind(), TokenKind::SmallInt);
     }
 }

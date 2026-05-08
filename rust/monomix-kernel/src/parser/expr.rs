@@ -98,7 +98,11 @@ impl<'s, 'p> ExprParser<'s, 'p> {
         // WITHOUT consuming — leave the token for the caller (e.g. statement
         // synchronisation) to handle. This keeps error recovery accurate so
         // a malformed expression doesn't eat the trailing terminator.
+        //
+        // `Invalid` already carries a lexer-emitted diagnostic; bail to
+        // synchronise without re-diagnosing.
         match self.lexer.peek_kind() {
+            TokenKind::Invalid => return Err(()),
             TokenKind::Semi | TokenKind::Dollar | TokenKind::Eof | TokenKind::RParen => {
                 let span = self.lexer.peek().1;
                 let found = self.lexer.peek_kind();
