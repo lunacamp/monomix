@@ -114,7 +114,15 @@ fn simplify_node_inner(
             }
             consolidate_powers(pool, expr)
         }
-        ExprNode::Pow(_, _) => consolidate_nested_pow(pool, expr),
+        ExprNode::Pow(_, _) => {
+            // Try numeric folding first (e.g. `2^10 → 1024`); fold_numeric
+            // already handles SmallInt^SmallInt with non-negative exponent.
+            // Falls through to nested-pow consolidation for symbolic bases.
+            if let Some(folded) = fold_numeric(pool, expr) {
+                return folded;
+            }
+            consolidate_nested_pow(pool, expr)
+        }
         ExprNode::Div(_, _) => {
             if config.gcd {
                 simplify_div(pool, expr).unwrap_or(expr)
