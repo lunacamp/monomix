@@ -1,0 +1,347 @@
+use crate::expr::{ExprPool, ExprId, ExprNode, FnTag, InternedStr};
+use crate::parser::ast::{Diagnostic, DiagnosticCode, Severity, Span, SpanMap, TokenKind};
+use crate::parser::lexer::{Lexer, Token};
+
+pub(crate) struct ExprParser<'s, 'p> {
+    pub(crate) lexer: Lexer<'s>,
+    pub(crate) pool: &'p mut ExprPool,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) span_map: SpanMap,
+    pub(crate) src: &'s str,
+    pub(crate) builtins: BuiltinIds,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct BuiltinIds {
+    pub df:       InternedStr,
+    pub int_:     InternedStr,
+    pub solve:    InternedStr,
+    pub factor:   InternedStr,
+    pub expand:   InternedStr,
+    pub simplify: InternedStr,
+    pub sub:      InternedStr,
+}
+
+impl BuiltinIds {
+    pub(crate) fn new(pool: &mut ExprPool) -> Self {
+        BuiltinIds {
+            df:       pool.intern_str_pub("df"),
+            int_:     pool.intern_str_pub("int"),
+            solve:    pool.intern_str_pub("solve"),
+            factor:   pool.intern_str_pub("factor"),
+            expand:   pool.intern_str_pub("expand"),
+            simplify: pool.intern_str_pub("simplify"),
+            sub:      pool.intern_str_pub("sub"),
+        }
+    }
+}
+
+fn infix_bp(kind: TokenKind) -> Option<(u8, u8)> {
+    match kind {
+        TokenKind::Equals          => Some((10, 0)),    // non-associative
+        TokenKind::Plus
+        | TokenKind::Minus         => Some((20, 21)),   // left-assoc
+        TokenKind::Star
+        | TokenKind::Slash         => Some((30, 31)),   // left-assoc
+        TokenKind::Pow             => Some((50, 49)),   // right-assoc
+        _                          => None,
+    }
+}
+
+fn prefix_bp(kind: TokenKind) -> Option<u8> {
+    match kind {
+        TokenKind::Minus => Some(40),
+        _                => None,
+    }
+}
+
+impl<'s, 'p> ExprParser<'s, 'p> {
+    pub(crate) fn parse_expr(&mut self, min_bp: u8) -> Result<ExprId, ()> {
+        let (tok, tok_span) = self.lexer.next();
+        let mut lhs = match tok {
+            Token::SmallInt(n) => {
+                let id = self.pool.small_int(n);
+                self.span_map.insert(id, tok_span);
+                id
+            }
+            Token::BigInt(n) => {
+                let id = self.pool.integer(*n);
+                self.span_map.insert(id, tok_span);
+                id
+            }
+            Token::Float(f) => {
+                let id = self.pool.float(f);
+                self.span_map.insert(id, tok_span);
+                id
+            }
+            Token::Ident(span) => self.parse_ident_or_call(span)?,
+            Token::LParen => {
+                let inner = self.parse_expr(0)?;
+                self.expect(TokenKind::RParen)?;
+                inner
+            }
+            Token::Minus => {
+                let bp = prefix_bp(TokenKind::Minus).unwrap();
+                let right = self.parse_expr(bp)?;
+                let id = self.pool.neg(right);
+                self.span_map.insert(id, tok_span);
+                id
+            }
+            other => {
+                self.emit_unexpected(other, tok_span, "expression");
+                return Err(());
+            }
+        };
+
+        // Rational literal shortcut: SmallInt/BigInt '/' SmallInt/BigInt
+        if matches!(self.pool.get(lhs), ExprNode::SmallInt(_) | ExprNode::BigInt(_))
+            && self.lexer.peek_kind() == TokenKind::Slash
+        {
+            if let Some(rat_id) = self.try_rational(lhs) {
+                lhs = rat_id;
+            }
+        }
+
+        // Pratt infix loop — kind-only peek, no clone.
+        loop {
+            let op_kind = self.lexer.peek_kind();
+            let Some((left_bp, right_bp)) = infix_bp(op_kind) else { break };
+            if left_bp <= min_bp { break }
+            let (op_tok, _op_span) = self.lexer.next();
+            let rhs = self.parse_expr(right_bp)?;
+            lhs = self.build_infix(op_tok, lhs, rhs);
+        }
+
+        Ok(lhs)
+    }
+
+    fn try_rational(&mut self, lhs: ExprId) -> Option<ExprId> {
+        let slash_kind = self.lexer.peek_at(0).0.kind();
+        let next_kind  = self.lexer.peek_at(1).0.kind();
+        if slash_kind == TokenKind::Slash
+            && (next_kind == TokenKind::SmallInt || next_kind == TokenKind::BigInt)
+        {
+            self.lexer.next(); // consume '/'
+            let (den_tok, _) = self.lexer.next();
+            let (p, q) = match (self.pool.get(lhs).clone(), den_tok) {
+                (ExprNode::SmallInt(p), Token::SmallInt(q)) => {
+                    (num_bigint::BigInt::from(p), num_bigint::BigInt::from(q))
+                }
+                _ => return None,
+            };
+            Some(self.pool.rational(p, q))
+        } else {
+            None
+        }
+    }
+
+    fn build_infix(&mut self, op: Token, lhs: ExprId, rhs: ExprId) -> ExprId {
+        match op {
+            Token::Plus    => self.pool.add(vec![lhs, rhs]),
+            Token::Minus   => {
+                let neg = self.pool.neg(rhs);
+                self.pool.add(vec![lhs, neg])
+            }
+            Token::Star    => self.pool.mul(vec![lhs, rhs]),
+            Token::Slash   => self.pool.div(lhs, rhs),
+            Token::Pow     => self.pool.pow(lhs, rhs),
+            Token::Equals  => self.pool.eq_node(lhs, rhs),
+            _ => unreachable!("non-infix operator passed to build_infix"),
+        }
+    }
+
+    fn parse_ident_or_call(&mut self, ident_span: Span) -> Result<ExprId, ()> {
+        let raw = &self.src[ident_span.start as usize..ident_span.end as usize];
+        let lower = raw.to_lowercase();
+        let name = self.pool.intern_str_pub(&lower);
+
+        if self.lexer.peek_kind() != TokenKind::LParen {
+            let id = self.pool.symbol_by_id(name);
+            self.span_map.insert(id, ident_span);
+            return Ok(id);
+        }
+        self.lexer.next(); // consume '('
+
+        let bt = self.builtins;
+        if name == bt.df       { return self.parse_df(); }
+        if name == bt.int_     { return self.parse_unary_builtin(FnTag::Custom(name)); }
+        if name == bt.solve    { return self.parse_solve_call(); }
+        if name == bt.factor   { return self.parse_unary_builtin(FnTag::Custom(name)); }
+        if name == bt.expand   { return self.parse_unary_builtin(FnTag::Custom(name)); }
+        if name == bt.simplify { return self.parse_unary_builtin(FnTag::Custom(name)); }
+        if name == bt.sub      { return self.parse_sub(); }
+        self.parse_generic_call(name)
+    }
+
+    fn parse_arg_list(&mut self) -> Result<Vec<ExprId>, ()> {
+        let mut args = Vec::new();
+        if self.lexer.peek_kind() == TokenKind::RParen {
+            self.lexer.next();
+            return Ok(args);
+        }
+        loop {
+            args.push(self.parse_expr(0)?);
+            match self.lexer.peek_kind() {
+                TokenKind::Comma => { self.lexer.next(); }
+                TokenKind::RParen => { self.lexer.next(); break; }
+                _ => {
+                    let (tok, span) = self.lexer.next();
+                    self.emit_unexpected(tok, span, "',' or ')'");
+                    return Err(());
+                }
+            }
+        }
+        Ok(args)
+    }
+
+    fn parse_generic_call(&mut self, name: InternedStr) -> Result<ExprId, ()> {
+        let args = self.parse_arg_list()?;
+        Ok(self.pool.func(FnTag::Custom(name), args))
+    }
+
+    fn parse_unary_builtin(&mut self, tag: FnTag) -> Result<ExprId, ()> {
+        let arg = self.parse_expr(0)?;
+        self.expect(TokenKind::RParen)?;
+        Ok(self.pool.func(tag, vec![arg]))
+    }
+
+    fn parse_df(&mut self) -> Result<ExprId, ()> {
+        let expr = self.parse_expr(0)?;
+        self.expect(TokenKind::Comma)?;
+        let var = self.parse_expr(0)?;
+        let mut result = self.pool.func(FnTag::Custom(self.builtins.df), vec![expr, var]);
+        while self.lexer.peek_kind() == TokenKind::Comma {
+            self.lexer.next();
+            let next_var = self.parse_expr(0)?;
+            result = self.pool.func(FnTag::Custom(self.builtins.df), vec![result, next_var]);
+        }
+        self.expect(TokenKind::RParen)?;
+        Ok(result)
+    }
+
+    fn parse_solve_call(&mut self) -> Result<ExprId, ()> {
+        let eq = self.parse_expr(0)?;
+        self.expect(TokenKind::Comma)?;
+        let var = self.parse_expr(0)?;
+        self.expect(TokenKind::RParen)?;
+        Ok(self.pool.func(FnTag::Custom(self.builtins.solve), vec![eq, var]))
+    }
+
+    fn parse_sub(&mut self) -> Result<ExprId, ()> {
+        // sub(x = val, expr) or sub(x = a, y = b, expr)
+        let mut bindings: Vec<ExprId> = Vec::new();
+        loop {
+            let lhs = self.parse_expr(0)?;
+            self.expect(TokenKind::Equals)?;
+            let rhs = self.parse_expr(0)?;
+            bindings.push(self.pool.eq_node(lhs, rhs));
+            match self.lexer.peek_kind() {
+                TokenKind::Comma => {
+                    self.lexer.next();
+                    // If next two tokens look like another binding (IDENT '='), continue
+                    if self.lexer.peek_kind() == TokenKind::Ident
+                        && self.lexer.peek_at(1).0.kind() == TokenKind::Equals
+                    {
+                        continue;
+                    }
+                    // Otherwise treat the next expression as the target
+                    let target = self.parse_expr(0)?;
+                    self.expect(TokenKind::RParen)?;
+                    let mut args = bindings;
+                    args.push(target);
+                    return Ok(self.pool.func(FnTag::Custom(self.builtins.sub), args));
+                }
+                _ => {
+                    let (tok, span) = self.lexer.next();
+                    self.emit_unexpected(tok, span, "',' before sub() target expression");
+                    return Err(());
+                }
+            }
+        }
+    }
+
+    pub(crate) fn expect(&mut self, kind: TokenKind) -> Result<(Token, Span), ()> {
+        let (tok, span) = self.lexer.next();
+        if tok.kind() == kind {
+            Ok((tok, span))
+        } else {
+            self.emit_unexpected(tok, span, "?");
+            Err(())
+        }
+    }
+
+    fn emit_unexpected(&mut self, tok: Token, span: Span, expected: &'static str) {
+        let found = tok.kind();
+        self.diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            span,
+            message: format!("unexpected token {:?}, expected {}", found, expected),
+            code: DiagnosticCode::UnexpectedToken { found, expected },
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::ExprPool;
+    use crate::parser::lexer::Lexer;
+
+    fn parse_one(src: &str) -> (ExprPool, crate::expr::ExprId) {
+        let mut pool = ExprPool::new();
+        let builtins = BuiltinIds::new(&mut pool);
+        let mut p = ExprParser {
+            lexer: Lexer::new(src),
+            pool: &mut pool,
+            diagnostics: Vec::new(),
+            span_map: rustc_hash::FxHashMap::default(),
+            src,
+            builtins,
+        };
+        let id = p.parse_expr(0).expect("parse should succeed");
+        assert!(p.diagnostics.is_empty(), "diagnostics: {:?}", p.diagnostics);
+        let id_copy = id;
+        drop(p);
+        (pool, id_copy)
+    }
+
+    #[test]
+    fn parse_integer_literal() {
+        let (pool, id) = parse_one("42");
+        assert_eq!(*pool.get(id), crate::expr::ExprNode::SmallInt(42));
+    }
+
+    #[test]
+    fn parse_precedence_add_mul() {
+        let (pool, id) = parse_one("1 + 2 * 3");
+        if let crate::expr::ExprNode::Add(children) = pool.get(id).clone() {
+            assert_eq!(children.len(), 2);
+            let mul = pool.get(children[1]).clone();
+            assert!(matches!(mul, crate::expr::ExprNode::Mul(_)));
+        } else {
+            panic!("expected Add, got {:?}", pool.get(id));
+        }
+    }
+
+    #[test]
+    fn parse_pow_right_associative() {
+        let (pool, id) = parse_one("2^3^4");
+        if let crate::expr::ExprNode::Pow(_, exp) = *pool.get(id) {
+            assert!(matches!(pool.get(exp), crate::expr::ExprNode::Pow(_, _)));
+        } else {
+            panic!("expected Pow, got {:?}", pool.get(id));
+        }
+    }
+
+    #[test]
+    fn parse_double_negation_normalizes() {
+        let (pool, id) = parse_one("-(-x)");
+        assert!(matches!(pool.get(id), crate::expr::ExprNode::Symbol(_)));
+    }
+
+    #[test]
+    fn parse_equality() {
+        let (pool, id) = parse_one("x = y");
+        assert!(matches!(pool.get(id), crate::expr::ExprNode::Eq(_, _)));
+    }
+}

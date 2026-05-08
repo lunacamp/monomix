@@ -1,7 +1,10 @@
+use crate::expr::ExprId;
+use rustc_hash::FxHashMap;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Span { pub start: u32, pub end: u32 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub span: Span,
@@ -48,4 +51,30 @@ impl Span {
         if self.start == u32::MAX { return "<synthetic>"; }
         &source[self.start as usize..self.end as usize]
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OutputMode { Display, Suppress }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StmtKind {
+    Expr,
+    Assign { lhs: crate::expr::InternedStr },
+}
+
+#[derive(Debug, Clone)]
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub expr: ExprId,
+    pub output: OutputMode,
+    pub span: Span,
+}
+
+pub type SpanMap = FxHashMap<ExprId, Span>;
+
+#[derive(Debug)]
+pub struct ParseResult {
+    pub statements: Vec<Stmt>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub span_map: SpanMap,
 }

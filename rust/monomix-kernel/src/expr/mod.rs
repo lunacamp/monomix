@@ -121,6 +121,12 @@ impl ExprPool {
         InternedStr(idx as u32)
     }
 
+    /// Public access to the string-interner. Used by the parser to convert
+    /// identifier source text into `InternedStr` handles.
+    pub(crate) fn intern_str_pub(&mut self, s: &str) -> InternedStr {
+        self.intern_str(s)
+    }
+
     pub fn str_of(&self, s: InternedStr) -> &str {
         self.strings.get_index(s.0 as usize).map(|s| s.as_str()).unwrap_or("<?>")
     }
