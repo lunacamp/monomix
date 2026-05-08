@@ -20,6 +20,17 @@ pub(crate) struct BuiltinIds {
     pub expand:   InternedStr,
     pub simplify: InternedStr,
     pub sub:      InternedStr,
+    // Built-in math functions — dispatched to their FnTag variants
+    pub sin:  InternedStr,
+    pub cos:  InternedStr,
+    pub tan:  InternedStr,
+    pub exp:  InternedStr,
+    pub log:  InternedStr,
+    pub sqrt: InternedStr,
+    pub abs:  InternedStr,
+    pub asin: InternedStr,
+    pub acos: InternedStr,
+    pub atan: InternedStr,
 }
 
 impl BuiltinIds {
@@ -32,7 +43,32 @@ impl BuiltinIds {
             expand:   pool.intern_str_pub("expand"),
             simplify: pool.intern_str_pub("simplify"),
             sub:      pool.intern_str_pub("sub"),
+            sin:      pool.intern_str_pub("sin"),
+            cos:      pool.intern_str_pub("cos"),
+            tan:      pool.intern_str_pub("tan"),
+            exp:      pool.intern_str_pub("exp"),
+            log:      pool.intern_str_pub("log"),
+            sqrt:     pool.intern_str_pub("sqrt"),
+            abs:      pool.intern_str_pub("abs"),
+            asin:     pool.intern_str_pub("asin"),
+            acos:     pool.intern_str_pub("acos"),
+            atan:     pool.intern_str_pub("atan"),
         }
+    }
+
+    /// Map an interned name to a built-in FnTag variant, if any.
+    pub(crate) fn fn_tag_for(&self, name: InternedStr) -> Option<FnTag> {
+        if name == self.sin  { return Some(FnTag::Sin); }
+        if name == self.cos  { return Some(FnTag::Cos); }
+        if name == self.tan  { return Some(FnTag::Tan); }
+        if name == self.exp  { return Some(FnTag::Exp); }
+        if name == self.log  { return Some(FnTag::Log); }
+        if name == self.sqrt { return Some(FnTag::Sqrt); }
+        if name == self.abs  { return Some(FnTag::Abs); }
+        if name == self.asin { return Some(FnTag::Asin); }
+        if name == self.acos { return Some(FnTag::Acos); }
+        if name == self.atan { return Some(FnTag::Atan); }
+        None
     }
 }
 
@@ -77,7 +113,7 @@ impl<'s, 'p> ExprParser<'s, 'p> {
             Token::Ident(span) => self.parse_ident_or_call(span)?,
             Token::LParen => {
                 let inner = self.parse_expr(0)?;
-                self.expect(TokenKind::RParen)?;
+                self.expect(TokenKind::RParen, "')'")?;
                 inner
             }
             Token::Minus => {
@@ -170,6 +206,11 @@ impl<'s, 'p> ExprParser<'s, 'p> {
         if name == bt.expand   { return self.parse_unary_builtin(FnTag::Custom(name)); }
         if name == bt.simplify { return self.parse_unary_builtin(FnTag::Custom(name)); }
         if name == bt.sub      { return self.parse_sub(); }
+        // Math built-ins (sin/cos/etc.) → proper FnTag variant
+        if let Some(tag) = bt.fn_tag_for(name) {
+            let args = self.parse_arg_list()?;
+            return Ok(self.pool.func(tag, args));
+        }
         self.parse_generic_call(name)
     }
 
@@ -201,13 +242,13 @@ impl<'s, 'p> ExprParser<'s, 'p> {
 
     fn parse_unary_builtin(&mut self, tag: FnTag) -> Result<ExprId, ()> {
         let arg = self.parse_expr(0)?;
-        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::RParen, "')'")?;
         Ok(self.pool.func(tag, vec![arg]))
     }
 
     fn parse_df(&mut self) -> Result<ExprId, ()> {
         let expr = self.parse_expr(0)?;
-        self.expect(TokenKind::Comma)?;
+        self.expect(TokenKind::Comma, "','")?;
         let var = self.parse_expr(0)?;
         let mut result = self.pool.func(FnTag::Custom(self.builtins.df), vec![expr, var]);
         while self.lexer.peek_kind() == TokenKind::Comma {
@@ -215,15 +256,15 @@ impl<'s, 'p> ExprParser<'s, 'p> {
             let next_var = self.parse_expr(0)?;
             result = self.pool.func(FnTag::Custom(self.builtins.df), vec![result, next_var]);
         }
-        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::RParen, "')'")?;
         Ok(result)
     }
 
     fn parse_solve_call(&mut self) -> Result<ExprId, ()> {
         let eq = self.parse_expr(0)?;
-        self.expect(TokenKind::Comma)?;
+        self.expect(TokenKind::Comma, "','")?;
         let var = self.parse_expr(0)?;
-        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::RParen, "')'")?;
         Ok(self.pool.func(FnTag::Custom(self.builtins.solve), vec![eq, var]))
     }
 
@@ -232,7 +273,7 @@ impl<'s, 'p> ExprParser<'s, 'p> {
         let mut bindings: Vec<ExprId> = Vec::new();
         loop {
             let lhs = self.parse_expr(0)?;
-            self.expect(TokenKind::Equals)?;
+            self.expect(TokenKind::Equals, "'=' in sub binding")?;
             let rhs = self.parse_expr(0)?;
             bindings.push(self.pool.eq_node(lhs, rhs));
             match self.lexer.peek_kind() {
@@ -246,7 +287,7 @@ impl<'s, 'p> ExprParser<'s, 'p> {
                     }
                     // Otherwise treat the next expression as the target
                     let target = self.parse_expr(0)?;
-                    self.expect(TokenKind::RParen)?;
+                    self.expect(TokenKind::RParen, "')'")?;
                     let mut args = bindings;
                     args.push(target);
                     return Ok(self.pool.func(FnTag::Custom(self.builtins.sub), args));
@@ -260,12 +301,12 @@ impl<'s, 'p> ExprParser<'s, 'p> {
         }
     }
 
-    pub(crate) fn expect(&mut self, kind: TokenKind) -> Result<(Token, Span), ()> {
+    pub(crate) fn expect(&mut self, kind: TokenKind, expected: &'static str) -> Result<(Token, Span), ()> {
         let (tok, span) = self.lexer.next();
         if tok.kind() == kind {
             Ok((tok, span))
         } else {
-            self.emit_unexpected(tok, span, "?");
+            self.emit_unexpected(tok, span, expected);
             Err(())
         }
     }
@@ -343,5 +384,33 @@ mod tests {
     fn parse_equality() {
         let (pool, id) = parse_one("x = y");
         assert!(matches!(pool.get(id), crate::expr::ExprNode::Eq(_, _)));
+    }
+
+    #[test]
+    fn parse_sin_dispatches_to_fn_sin() {
+        let (pool, id) = parse_one("sin(x)");
+        match pool.get(id) {
+            crate::expr::ExprNode::Fn(crate::expr::FnTag::Sin, args) => {
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected Fn(Sin, ...), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_log_dispatches_to_fn_log() {
+        let (pool, id) = parse_one("log(x)");
+        assert!(matches!(pool.get(id), crate::expr::ExprNode::Fn(crate::expr::FnTag::Log, _)));
+    }
+
+    #[test]
+    fn parse_unknown_function_is_custom() {
+        let (pool, id) = parse_one("foo(x, y)");
+        match pool.get(id) {
+            crate::expr::ExprNode::Fn(crate::expr::FnTag::Custom(_), args) => {
+                assert_eq!(args.len(), 2);
+            }
+            other => panic!("expected Fn(Custom(...), ...), got {:?}", other),
+        }
     }
 }
