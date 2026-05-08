@@ -32,3 +32,20 @@ pub enum TokenKind {
     Assign, Equals, Comma, LParen, RParen,
     Semi, Dollar, KwComment, Eof,
 }
+
+impl Span {
+    pub const SYNTHETIC: Span = Span { start: u32::MAX, end: u32::MAX };
+
+    pub fn of(start: usize, end: usize) -> Self {
+        Span { start: start as u32, end: end as u32 }
+    }
+
+    pub fn merge(self, other: Span) -> Span {
+        Span { start: self.start.min(other.start), end: self.end.max(other.end) }
+    }
+
+    pub fn to_str<'s>(&self, source: &'s str) -> &'s str {
+        if self.start == u32::MAX { return "<synthetic>"; }
+        &source[self.start as usize..self.end as usize]
+    }
+}
