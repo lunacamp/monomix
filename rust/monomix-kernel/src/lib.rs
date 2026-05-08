@@ -1,5 +1,6 @@
 pub mod diff;
 pub mod error;
+pub mod evalnum;
 pub mod expr;
 pub mod parser;
 pub mod poly;
