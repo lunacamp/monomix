@@ -175,23 +175,24 @@ impl<'s, 'p> ExprParser<'s, 'p> {
     }
 
     fn try_rational(&mut self, lhs: ExprId) -> Option<ExprId> {
-        let slash_kind = self.lexer.peek_at(0).0.kind();
-        let next_kind  = self.lexer.peek_at(1).0.kind();
-        if slash_kind == TokenKind::Slash
-            && (next_kind == TokenKind::SmallInt || next_kind == TokenKind::BigInt)
-        {
-            self.lexer.next(); // consume '/'
-            let (den_tok, _) = self.lexer.next();
-            let (p, q) = match (self.pool.get(lhs).clone(), den_tok) {
-                (ExprNode::SmallInt(p), Token::SmallInt(q)) => {
-                    (num_bigint::BigInt::from(p), num_bigint::BigInt::from(q))
-                }
-                _ => return None,
-            };
-            Some(self.pool.rational(p, q))
-        } else {
-            None
+        if self.lexer.peek_at(0).0.kind() != TokenKind::Slash {
+            return None;
         }
+
+        let p = match self.pool.get(lhs).clone() {
+            ExprNode::SmallInt(p) => num_bigint::BigInt::from(p),
+            _ => return None,
+        };
+
+        let q = match self.lexer.peek_at(1).0 {
+            Token::SmallInt(0) => return None,
+            Token::SmallInt(q) => num_bigint::BigInt::from(q),
+            _ => return None,
+        };
+
+        self.lexer.next(); // consume '/'
+        self.lexer.next(); // consume denominator
+        Some(self.pool.rational(p, q))
     }
 
     fn build_infix(&mut self, op: Token, lhs: ExprId, rhs: ExprId) -> ExprId {
