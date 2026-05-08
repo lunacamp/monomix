@@ -1,0 +1,106 @@
+# ~20 hand-curated pure arithmetic / simplification expressions from alg.tst.
+# No for/procedure/array/operator/on/off lines.
+
+[[entries]]
+input = "1 + 1;"
+expected = "2"
+ignore = false
+
+[[entries]]
+input = "2 + 3;"
+expected = "5"
+ignore = false
+
+[[entries]]
+input = "3 * 4;"
+expected = "12"
+ignore = false
+
+[[entries]]
+input = "10 - 3;"
+expected = "7"
+ignore = false
+
+[[entries]]
+input = "2^10;"
+expected = "1024"
+ignore = false
+
+[[entries]]
+input = "x + x;"
+expected = "2*x"
+ignore = false
+
+[[entries]]
+input = "x * x;"
+expected = "x^2"
+ignore = false
+
+[[entries]]
+input = "x^2 + x^2;"
+expected = "2*x^2"
+ignore = false
+
+[[entries]]
+input = "(x + 1)^2;"
+expected = "x^2 + 2*x + 1"
+ignore = true
+ignore_reason = "simplification not yet implemented in M1"
+
+[[entries]]
+input = "x^2 - y^2;"
+expected = "x^2 - y^2"
+ignore = false
+
+[[entries]]
+input = "a + b + c;"
+expected = "a + b + c"
+ignore = false
+
+[[entries]]
+input = "(a + b) * (a - b);"
+expected = "a^2 - b^2"
+ignore = true
+ignore_reason = "simplification not yet implemented in M1"
+
+[[entries]]
+input = "1/2 + 1/3;"
+expected = "5/6"
+ignore = true
+ignore_reason = "rational arithmetic not yet in M1 without simplify"
+
+[[entries]]
+input = "x + 0;"
+expected = "x"
+ignore = false
+
+[[entries]]
+input = "x * 1;"
+expected = "x"
+ignore = false
+
+[[entries]]
+input = "x^0;"
+expected = "1"
+ignore = false
+
+[[entries]]
+input = "x^1;"
+expected = "x"
+ignore = false
+
+[[entries]]
+input = "0 * x;"
+expected = "0"
+ignore = false
+
+[[entries]]
+input = "x + y;"
+expected = "x + y"
+ignore = false
+
+[[entries]]
+input = "2 * x + 3 * x;"
+expected = "5*x"
+ignore = true
+ignore_reason = "like-terms collection not yet in M1"

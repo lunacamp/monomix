@@ -1,0 +1,10 @@
+# Known intentional divergences between Monomix output and REDUCE output.
+# Every divergence must have an entry here before marking ignore=true in a manifest.
+
+[[divergences]]
+id = "rational-display"
+reason = "REDUCE prints rationals as p/q inline; Monomix may print differently"
+
+[[divergences]]
+id = "symbol-ordering"
+reason = "REDUCE uses lexicographic ordering; Monomix uses ExprId sort order"
