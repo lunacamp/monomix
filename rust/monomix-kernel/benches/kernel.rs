@@ -41,5 +41,42 @@ fn bench_map_bottom_up_identity(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_intern_integers, bench_intern_add_nodes, bench_map_bottom_up_identity);
+use monomix_kernel::parser::parse;
+
+fn bench_parse_100_term_poly(c: &mut Criterion) {
+    // Build a 100-term polynomial source string: 1*x^100 + 2*x^99 + ...
+    let terms: Vec<String> = (1..=100)
+        .map(|i| format!("{}*x^{}", i, 101 - i))
+        .collect();
+    let src = format!("{};", terms.join(" + "));
+
+    c.bench_function("parse 100-term polynomial", |b| {
+        b.iter(|| {
+            let mut pool = monomix_kernel::expr::ExprPool::new();
+            black_box(parse(&src, &mut pool));
+        });
+    });
+}
+
+fn bench_parse_20_assignments(c: &mut Criterion) {
+    let src = (0..20)
+        .map(|i| format!("x{} := {}*y + {};", i, i, i + 1))
+        .collect::<Vec<_>>()
+        .join(" ");
+    c.bench_function("parse 20 assignments", |b| {
+        b.iter(|| {
+            let mut pool = monomix_kernel::expr::ExprPool::new();
+            black_box(parse(&src, &mut pool));
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_intern_integers,
+    bench_intern_add_nodes,
+    bench_map_bottom_up_identity,
+    bench_parse_100_term_poly,
+    bench_parse_20_assignments,
+);
 criterion_main!(benches);

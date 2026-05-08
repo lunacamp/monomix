@@ -82,4 +82,51 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.statements.len(), 1); // "2 + 3" parsed OK
     }
+
+    #[test]
+    fn parse_comment_block_skipped() {
+        let mut pool = ExprPool::new();
+        let result = parse("comment foo bar baz; 1 + 2;", &mut pool);
+        // The comment block consumes itself; only `1 + 2;` survives.
+        assert_eq!(result.diagnostics.len(), 0);
+        assert_eq!(result.statements.len(), 1);
+    }
+
+    #[test]
+    fn parse_nested_paren_recovery() {
+        let mut pool = ExprPool::new();
+        let result = parse("(1 + ); 2 + 3;", &mut pool);
+        // The malformed first stmt produces >=1 diagnostic; the second parses.
+        assert!(!result.diagnostics.is_empty());
+        assert_eq!(result.statements.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::expr::ExprPool;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn no_panic_on_arbitrary_input(s in "[ -~]{0,200}") {
+            let mut pool = ExprPool::new();
+            let result = parse(&s, &mut pool);
+            // Should never panic; diagnostics or stmts may be anything
+            // (We use len() >= 0 as a no-op assertion that the result is well-formed.)
+            let _ = result.diagnostics.len() + result.statements.len();
+        }
+
+        #[test]
+        fn span_bounds_valid(s in "[a-z0-9 +*();]{0,100}") {
+            let mut pool = ExprPool::new();
+            let result = parse(&s, &mut pool);
+            for (_, span) in &result.span_map {
+                prop_assert!(span.start <= span.end);
+                prop_assert!((span.end as usize) <= s.len()
+                    || *span == crate::parser::ast::Span::SYNTHETIC);
+            }
+        }
+    }
 }

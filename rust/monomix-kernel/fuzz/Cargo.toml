@@ -1,0 +1,25 @@
+[package]
+name = "monomix-kernel-fuzz"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.monomix-kernel]
+path = ".."
+
+# Prevent the fuzz crate from being treated as a workspace member of the
+# parent monomix workspace.
+[workspace]
+
+[[bin]]
+name = "fuzz_parser"
+path = "fuzz_targets/fuzz_parser.rs"
+test = false
+doc = false
+bench = false
