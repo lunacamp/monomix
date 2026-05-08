@@ -106,6 +106,25 @@ fn bench_diff_20_term_poly(c: &mut Criterion) {
     });
 }
 
+use monomix_kernel::simplify::{simplify, SimplifierConfig, SimplifyCache};
+
+fn bench_simplify_50_term_sum(c: &mut Criterion) {
+    c.bench_function("simplify 50-term sum", |b| {
+        b.iter(|| {
+            let mut pool = monomix_kernel::expr::ExprPool::new();
+            let x = pool.symbol("x");
+            let terms: Vec<_> = (1i64..=50).map(|i| {
+                let coeff = pool.small_int(i);
+                pool.mul(vec![coeff, x])
+            }).collect();
+            let expr = pool.add(terms);
+            let config = SimplifierConfig::default();
+            let mut cache = SimplifyCache::new();
+            black_box(simplify(&mut pool, expr, &config, &mut cache));
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_intern_integers,
@@ -115,5 +134,6 @@ criterion_group!(
     bench_parse_20_assignments,
     bench_expand_x_plus_1_pow_20,
     bench_diff_20_term_poly,
+    bench_simplify_50_term_sum,
 );
 criterion_main!(benches);

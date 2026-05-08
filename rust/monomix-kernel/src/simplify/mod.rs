@@ -85,3 +85,55 @@ mod tests {
         assert!(matches!(pool.get(result), ExprNode::Pow(_, _)));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::expr::ExprPool;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn simplify_idempotent_arbitrary(n in 1i64..100, m in 1i64..100) {
+            let mut pool = ExprPool::new();
+            let x = pool.symbol("x");
+            let n_int = pool.small_int(n);
+            let m_int = pool.small_int(m);
+            let nx = pool.mul(vec![n_int, x]);
+            let mx = pool.mul(vec![m_int, x]);
+            let expr = pool.add(vec![nx, mx]);
+            let config = SimplifierConfig::default();
+            let mut cache = SimplifyCache::new();
+            let r1 = simplify(&mut pool, expr, &config, &mut cache);
+            let r2 = simplify(&mut pool, r1, &config, &mut cache);
+            prop_assert_eq!(r1, r2, "simplify must be idempotent");
+        }
+
+        #[test]
+        fn simplify_iters_at_most_2(n in 1i64..20, m in 1i64..20) {
+            let mut pool = ExprPool::new();
+            let x = pool.symbol("x");
+            let n_int = pool.small_int(n);
+            let m_int = pool.small_int(m);
+            let nx = pool.mul(vec![n_int, x]);
+            let mx = pool.mul(vec![m_int, x]);
+            let expr = pool.add(vec![nx, mx]);
+            let config = SimplifierConfig::default();
+            let mut cache = SimplifyCache::new();
+            let mut iters = 0u32;
+            let mut current = expr;
+            for _ in 0..driver::MAX_ITERS {
+                let next = {
+                    let mut map_cache = rustc_hash::FxHashMap::default();
+                    pool.map_bottom_up(current, &mut map_cache, &mut |pool, id| {
+                        driver::simplify_node_public(pool, id, &config, &mut cache)
+                    })
+                };
+                iters += 1;
+                if next == current { break; }
+                current = next;
+            }
+            prop_assert!(iters <= 2, "should converge in <=2 iterations for Phase 1 rule set, got {}", iters);
+        }
+    }
+}
