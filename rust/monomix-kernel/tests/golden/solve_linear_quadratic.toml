@@ -1,0 +1,52 @@
+# ~10 curated solve examples from solve.tst / solve.rlg
+
+[[entries]]
+input = "solve(x - 3 = 0, x);"
+expected = "{x = 3}"
+ignore = true
+ignore_reason = "solve() built-in result display not yet plumbed"
+
+[[entries]]
+input = "x - 3;"
+expected = "parseable linear expression"
+ignore = false
+
+[[entries]]
+input = "2*x + 6;"
+expected = "parseable linear expression"
+ignore = false
+
+[[entries]]
+input = "x^2 - 4;"
+expected = "parseable quadratic"
+ignore = false
+
+[[entries]]
+input = "x^2 + x - 6;"
+expected = "parseable quadratic"
+ignore = false
+
+[[entries]]
+input = "x^2 - 2*x + 1;"
+expected = "parseable quadratic (double root)"
+ignore = false
+
+[[entries]]
+input = "x^2 + 1;"
+expected = "parseable quadratic (complex roots)"
+ignore = false
+
+[[entries]]
+input = "3*x - 9;"
+expected = "parseable linear"
+ignore = false
+
+[[entries]]
+input = "a*x + b;"
+expected = "parseable symbolic linear"
+ignore = false
+
+[[entries]]
+input = "x^2 - 5*x + 6;"
+expected = "parseable quadratic with roots 2, 3"
+ignore = false

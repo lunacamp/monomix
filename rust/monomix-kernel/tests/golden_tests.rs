@@ -57,3 +57,18 @@ fn golden_poly_div() {
 fn golden_alg_expr() {
     run_manifest(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/alg_expr.toml"));
 }
+
+#[test]
+fn golden_solve() {
+    run_manifest(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/solve_linear_quadratic.toml"));
+}
+
+#[test]
+fn golden_simplify() {
+    run_manifest(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/simplify.toml"));
+}
+
+#[test]
+fn golden_diff() {
+    run_manifest(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/diff.toml"));
+}

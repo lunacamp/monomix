@@ -1,0 +1,108 @@
+# ~20 curated simplification examples
+
+[[entries]]
+input = "x + x;"
+expected = "2*x"
+ignore = true
+ignore_reason = "like-terms result display not yet implemented"
+
+[[entries]]
+input = "2 + 3;"
+expected = "5"
+ignore = false
+
+[[entries]]
+input = "x * 1;"
+expected = "x"
+ignore = false
+
+[[entries]]
+input = "0 + x;"
+expected = "x"
+ignore = false
+
+[[entries]]
+input = "x^0;"
+expected = "1"
+ignore = false
+
+[[entries]]
+input = "x^1;"
+expected = "x"
+ignore = false
+
+[[entries]]
+input = "0 * x;"
+expected = "0"
+ignore = false
+
+[[entries]]
+input = "x + 0;"
+expected = "x"
+ignore = false
+
+[[entries]]
+input = "1 * 1;"
+expected = "1"
+ignore = false
+
+[[entries]]
+input = "-(-x);"
+expected = "x"
+ignore = false
+
+[[entries]]
+input = "2 * 3;"
+expected = "6"
+ignore = false
+
+[[entries]]
+input = "4^2;"
+expected = "16"
+ignore = false
+
+[[entries]]
+input = "x + y + x;"
+expected = "2*x + y"
+ignore = true
+ignore_reason = "like-terms display not yet implemented"
+
+[[entries]]
+input = "a + b;"
+expected = "a + b"
+ignore = false
+
+[[entries]]
+input = "2*x + 3*x;"
+expected = "5*x"
+ignore = true
+ignore_reason = "like-terms result display not yet implemented"
+
+[[entries]]
+input = "x * x;"
+expected = "x^2"
+ignore = true
+ignore_reason = "power consolidation display not yet implemented"
+
+[[entries]]
+input = "x * x * x;"
+expected = "x^3"
+ignore = true
+ignore_reason = "power consolidation display not yet implemented"
+
+[[entries]]
+input = "1/2;"
+expected = "1/2"
+ignore = false
+
+[[entries]]
+input = "2/4;"
+expected = "1/2"
+ignore = true
+ignore_reason = "rational normalization display not yet implemented"
+
+[[entries]]
+input = "x - x;"
+expected = "0"
+ignore = true
+ignore_reason = "like-terms cancellation display not yet implemented"
