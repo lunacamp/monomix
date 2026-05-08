@@ -2,7 +2,9 @@ use crate::expr::{ExprId, ExprNode, ExprPool};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-/// Coefficient: i64 fast path with fallback to ExprId for overflow / non-integers.
+/// Coefficient: `i64` fast path with `ExprId` fallback for non-`i64` numerics
+/// (BigInt, Rational), `i64`-overflow during accumulation, and arbitrary
+/// symbolic sums produced by combining mixed coefficient kinds.
 #[derive(Clone, Debug)]
 pub enum Coeff {
     Int(i64),
@@ -46,32 +48,50 @@ impl Coeff {
 }
 
 /// Extract (coefficient, base) from an expression:
-/// - SmallInt(n) → (Int(n), pool.one)
-/// - Mul([SmallInt(n), rest...]) → (Int(n), pool.mul(rest))
-/// - Neg(x) → (Int(-1), x)
-/// - other → (Int(1), other)
+/// - `SmallInt(n)`           → (`Int(n)`, `pool.one`)
+/// - `BigInt(_)` / `Rational(_)` → (`Expr(self)`, `pool.one`)  — non-i64 numerics
+/// - `Neg(x)`                → (`Int(-1)`, x)
+/// - `Mul([num, rest...])`   → (coeff, `pool.mul(rest)`) where `num` is the
+///   first numeric child. `SmallInt` becomes `Coeff::Int`; `BigInt` /
+///   `Rational` become `Coeff::Expr`. Mul children are canonically sorted by
+///   `ExprId`, so the numeric coefficient may appear at any position.
+/// - other → (`Int(1)`, other)
+///
+/// Without the `BigInt` / `Rational` arms here, terms like `(1/2)*x +
+/// (1/3)*x` and `BIG*x + BIG*x` would be treated as distinct opaque bases
+/// and never collected.
 fn split_coeff(pool: &mut ExprPool, expr: ExprId) -> (Coeff, ExprId) {
     match pool.get(expr).clone() {
         ExprNode::SmallInt(n) => {
             let one = pool.one;
             (Coeff::Int(n), one)
         }
+        ExprNode::BigInt(_) | ExprNode::Rational(_) => {
+            let one = pool.one;
+            (Coeff::Expr(expr), one)
+        }
         ExprNode::Neg(x) => (Coeff::Int(-1), x),
         ExprNode::Mul(children) => {
             let ids: Vec<ExprId> = children.to_vec();
-            // Mul children are sorted canonically by ExprId, so a numeric
-            // coefficient can appear at any position (in particular, not
-            // necessarily at index 0). Scan for the first SmallInt.
-            let mut coeff_idx: Option<usize> = None;
-            let mut coeff_val: i64 = 0;
+            // Scan for the first numeric child (any of SmallInt / BigInt /
+            // Rational). Mul children are sorted canonically by ExprId, so
+            // a numeric coefficient may appear at any position, not just
+            // index 0.
+            let mut found: Option<(usize, Coeff)> = None;
             for (i, &id) in ids.iter().enumerate() {
-                if let ExprNode::SmallInt(n) = *pool.get(id) {
-                    coeff_idx = Some(i);
-                    coeff_val = n;
-                    break;
+                match pool.get(id) {
+                    &ExprNode::SmallInt(n) => {
+                        found = Some((i, Coeff::Int(n)));
+                        break;
+                    }
+                    ExprNode::BigInt(_) | ExprNode::Rational(_) => {
+                        found = Some((i, Coeff::Expr(id)));
+                        break;
+                    }
+                    _ => {}
                 }
             }
-            if let Some(i) = coeff_idx {
+            if let Some((i, coeff)) = found {
                 let rest_ids: Vec<ExprId> = ids
                     .iter()
                     .enumerate()
@@ -82,7 +102,7 @@ fn split_coeff(pool: &mut ExprPool, expr: ExprId) -> (Coeff, ExprId) {
                 } else {
                     pool.mul(rest_ids)
                 };
-                return (Coeff::Int(coeff_val), rest);
+                return (coeff, rest);
             }
             (Coeff::Int(1), expr)
         }
@@ -199,5 +219,101 @@ mod tests {
         let result = collect_like_terms(&mut pool, sum);
         // x + y stays as x + y
         assert!(matches!(pool.get(result), ExprNode::Add(_)));
+    }
+
+    #[test]
+    fn collect_rational_coefficients() {
+        // (1/2)*x + (1/3)*x must collect to a single term whose evaluation
+        // at x=1 is 5/6 ≈ 0.833...; before this fix, the two Mul nodes were
+        // treated as distinct opaque bases and never combined.
+        use crate::simplify::{simplify, SimplifierConfig, SimplifyCache};
+        use num_bigint::BigInt;
+
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let half = pool.rational(BigInt::from(1), BigInt::from(2));
+        let third = pool.rational(BigInt::from(1), BigInt::from(3));
+        let half_x = pool.mul(vec![half, x]);
+        let third_x = pool.mul(vec![third, x]);
+        let sum = pool.add(vec![half_x, third_x]);
+
+        let cfg = SimplifierConfig::default();
+        let mut cache = SimplifyCache::new();
+        let result = simplify(&mut pool, sum, &cfg, &mut cache);
+
+        // Result must NOT be a 2-term Add anymore — collection should have
+        // merged the like terms.
+        if let ExprNode::Add(c) = pool.get(result) {
+            assert_ne!(
+                c.len(), 2,
+                "(1/2)*x + (1/3)*x should collect into one term, got Add of len {}",
+                c.len()
+            );
+        }
+        // Numeric value at x=1 must be 5/6.
+        let bindings = vec![(x, 1.0)];
+        let v = crate::evalnum::evaluate_numeric(&pool, &bindings, result).unwrap();
+        assert!((v - 5.0_f64 / 6.0).abs() < 1e-9, "expected 5/6, got {}", v);
+    }
+
+    #[test]
+    fn collect_mixed_int_and_rational_coefficients() {
+        // 2*x + (1/3)*x = 7/3 * x. At x=1, value = 7/3 ≈ 2.333...
+        use crate::simplify::{simplify, SimplifierConfig, SimplifyCache};
+        use num_bigint::BigInt;
+
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let two = pool.small_int(2);
+        let third = pool.rational(BigInt::from(1), BigInt::from(3));
+        let two_x = pool.mul(vec![two, x]);
+        let third_x = pool.mul(vec![third, x]);
+        let sum = pool.add(vec![two_x, third_x]);
+
+        let cfg = SimplifierConfig::default();
+        let mut cache = SimplifyCache::new();
+        let result = simplify(&mut pool, sum, &cfg, &mut cache);
+
+        if let ExprNode::Add(c) = pool.get(result) {
+            assert_ne!(c.len(), 2, "mixed Int+Rational should collect");
+        }
+        let bindings = vec![(x, 1.0)];
+        let v = crate::evalnum::evaluate_numeric(&pool, &bindings, result).unwrap();
+        assert!((v - 7.0_f64 / 3.0).abs() < 1e-9, "expected 7/3, got {}", v);
+    }
+
+    #[test]
+    fn collect_bigint_coefficients() {
+        // BIG*x + BIG*x = 2*BIG*x where BIG > i64::MAX. Verified via
+        // evaluate_numeric — at x=1 the result equals 2 * BIG (as f64).
+        use crate::simplify::{simplify, SimplifierConfig, SimplifyCache};
+        use num_bigint::BigInt;
+        use num_traits::ToPrimitive;
+
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        // 2^65 — well beyond i64 range, forces BigInt representation.
+        let big: BigInt = BigInt::from(1u64) << 65;
+        let big_id = pool.integer(big.clone());
+        // Confirm we actually got a BigInt, not a SmallInt.
+        assert!(matches!(pool.get(big_id), ExprNode::BigInt(_)));
+        let big_x = pool.mul(vec![big_id, x]);
+        let big_x2 = pool.mul(vec![big_id, x]);
+        let sum = pool.add(vec![big_x, big_x2]);
+
+        let cfg = SimplifierConfig::default();
+        let mut cache = SimplifyCache::new();
+        let result = simplify(&mut pool, sum, &cfg, &mut cache);
+
+        if let ExprNode::Add(c) = pool.get(result) {
+            assert_ne!(
+                c.len(), 2,
+                "BigInt-coefficient like terms should collect"
+            );
+        }
+        let bindings = vec![(x, 1.0)];
+        let v = crate::evalnum::evaluate_numeric(&pool, &bindings, result).unwrap();
+        let expected = (BigInt::from(2) * &big).to_f64().unwrap();
+        assert!((v - expected).abs() / expected.abs() < 1e-12);
     }
 }
