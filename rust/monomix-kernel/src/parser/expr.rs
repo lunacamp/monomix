@@ -93,6 +93,25 @@ fn prefix_bp(kind: TokenKind) -> Option<u8> {
 
 impl<'s, 'p> ExprParser<'s, 'p> {
     pub(crate) fn parse_expr(&mut self, min_bp: u8) -> Result<ExprId, ()> {
+        // Boundary tokens (Semi, Dollar, Eof, RParen) are not expression
+        // starters. If we encounter one in prefix position, emit a diagnostic
+        // WITHOUT consuming — leave the token for the caller (e.g. statement
+        // synchronisation) to handle. This keeps error recovery accurate so
+        // a malformed expression doesn't eat the trailing terminator.
+        match self.lexer.peek_kind() {
+            TokenKind::Semi | TokenKind::Dollar | TokenKind::Eof | TokenKind::RParen => {
+                let span = self.lexer.peek().1;
+                let found = self.lexer.peek_kind();
+                self.diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    span,
+                    message: format!("unexpected token {:?}, expected expression", found),
+                    code: DiagnosticCode::UnexpectedToken { found, expected: "expression" },
+                });
+                return Err(());
+            }
+            _ => {}
+        }
         let (tok, tok_span) = self.lexer.next();
         let mut lhs = match tok {
             Token::SmallInt(n) => {
