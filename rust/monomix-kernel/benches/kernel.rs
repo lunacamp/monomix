@@ -125,6 +125,27 @@ fn bench_simplify_50_term_sum(c: &mut Criterion) {
     });
 }
 
+use monomix_kernel::solve::solve;
+
+fn bench_solve_quadratic(c: &mut Criterion) {
+    c.bench_function("solve quadratic x^2 - 5x + 6 = 0", |b| {
+        b.iter(|| {
+            let mut pool = monomix_kernel::expr::ExprPool::new();
+            let x = pool.symbol("x");
+            let zero = pool.zero;
+            let two_int = pool.small_int(2);
+            let x2 = pool.pow(x, two_int);
+            let five = pool.small_int(5);
+            let neg5 = pool.neg(five);
+            let neg5x = pool.mul(vec![neg5, x]);
+            let six = pool.small_int(6);
+            let poly = pool.add(vec![x2, neg5x, six]);
+            let eq = pool.eq_node(poly, zero);
+            black_box(solve(&mut pool, eq, x).unwrap());
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_intern_integers,
@@ -135,5 +156,6 @@ criterion_group!(
     bench_expand_x_plus_1_pow_20,
     bench_diff_20_term_poly,
     bench_simplify_50_term_sum,
+    bench_solve_quadratic,
 );
 criterion_main!(benches);

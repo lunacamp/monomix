@@ -330,3 +330,56 @@ mod tests {
         assert!(matches!(result, Err(KernelError::UnsupportedEquation { .. })));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::expr::ExprPool;
+    use crate::evalnum::evaluate_numeric;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn linear_solution_satisfies_equation(a in 1i64..20, b in -20i64..20) {
+            if a == 0 { return Ok(()); }
+            let mut pool = ExprPool::new();
+            let x = pool.symbol("x");
+            let zero = pool.zero;
+            // a*x + b = 0
+            let a_int = pool.small_int(a);
+            let b_int = pool.small_int(b);
+            let ax = pool.mul(vec![a_int, x]);
+            let poly = pool.add(vec![ax, b_int]);
+            let eq = pool.eq_node(poly, zero);
+            let result = solve(&mut pool, eq, x).unwrap();
+            prop_assert_eq!(result.solutions.len(), 1);
+            let (_, val) = result.solutions[0][0];
+            // a*val + b ≈ 0
+            let val_f = evaluate_numeric(&pool, &[], val).unwrap();
+            let residual = (a as f64) * val_f + (b as f64);
+            prop_assert!(residual.abs() < 1e-9, "residual = {}", residual);
+        }
+
+        #[test]
+        fn quadratic_with_real_roots(
+            p in -10i64..0i64,  // negative product → guaranteed real roots
+            q in 1i64..10i64,
+        ) {
+            // (x - p)(x - q) = x^2 - (p+q)x + p*q = 0; roots are p and q.
+            let mut pool = ExprPool::new();
+            let x = pool.symbol("x");
+            let zero = pool.zero;
+            let sum = pool.small_int(p + q);
+            let prod = pool.small_int(p * q);
+            let two_int = pool.small_int(2);
+            let x2 = pool.pow(x, two_int);
+            let neg_sum = pool.neg(sum);
+            let neg_sum_x = pool.mul(vec![neg_sum, x]);
+            let poly = pool.add(vec![x2, neg_sum_x, prod]);
+            let eq = pool.eq_node(poly, zero);
+            let result = solve(&mut pool, eq, x).unwrap();
+            prop_assert!(!result.has_complex_roots);
+            prop_assert_eq!(result.solutions.len(), 2);
+        }
+    }
+}
