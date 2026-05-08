@@ -194,6 +194,15 @@ fn try_to_f64(pool: &ExprPool, expr: ExprId) -> Option<f64> {
 ///   - constant term `b` = E(all vars = 0)
 ///   - coefficient `a_j` = E(x_j=1, others=0) - b
 ///
+/// **Linearity is verified by additional probing**: for each variable `j`
+/// the equation is also evaluated at `x_j=2` (others=0) and required to
+/// match `2·a_j + b`; for each pair (i, j) the equation is evaluated at
+/// `x_i=1, x_j=1` (others=0) and required to match `a_i + a_j + b`. Any
+/// mismatch (within a small tolerance) means the equation is nonlinear or
+/// has a cross-term, and `UnsupportedEquation` is returned. Without this
+/// check, a probe at 0/1 alone would silently accept e.g. `x²+y=0` or
+/// `x·y=0` and produce wrong "solutions".
+///
 /// Phase 1 limitation: coefficients must be numeric (BigInt / Rational /
 /// Float). Symbolic coefficients return `UnsupportedEquation`. Multivariate
 /// polynomial extraction is deferred to Phase 2.
@@ -214,8 +223,29 @@ pub fn solve_system(
     let zero_bindings: Vec<(ExprId, f64)> =
         vars.iter().map(|&v| (v, 0.0)).collect();
 
+    // Closure to evaluate the equation at a particular variable assignment,
+    // mapping any numeric-eval failure to UnsupportedEquation.
+    let eval_at = |pool: &ExprPool, expr: ExprId, bindings: &[(ExprId, f64)]|
+        -> Result<f64, KernelError> {
+        evaluate_numeric(pool, bindings, expr).map_err(|_| {
+            KernelError::UnsupportedEquation {
+                reason: "non-numeric coefficient in linear system".to_string(),
+            }
+        })
+    };
+
+    // Closeness check used by the linearity verification. Same shape as
+    // numpy.isclose: |a - b| <= atol + rtol·max(|a|, |b|). Both atol and rtol
+    // are 1e-9 — tight enough to catch a missing/extra integer coefficient,
+    // loose enough that float-arithmetic round-off in the eval doesn't
+    // false-positive.
+    let close = |actual: f64, expected: f64| -> bool {
+        let mag = actual.abs().max(expected.abs());
+        (actual - expected).abs() <= 1e-9 + 1e-9 * mag
+    };
+
     let mut mat: Vec<Vec<f64>> = Vec::with_capacity(n);
-    for &eq in equations {
+    for (eq_idx, &eq) in equations.iter().enumerate() {
         let (lhs, rhs) = match pool.get(eq) {
             ExprNode::Eq(l, r) => (*l, *r),
             _ => {
@@ -226,21 +256,59 @@ pub fn solve_system(
         let rhs_neg = pool.neg(rhs);
         let poly_expr = pool.add(vec![lhs, rhs_neg]);
 
-        let const_val = evaluate_numeric(pool, &zero_bindings, poly_expr)
-            .map_err(|_| KernelError::UnsupportedEquation {
-                reason: "non-numeric coefficient in linear system".to_string(),
-            })?;
+        let const_val = eval_at(pool, poly_expr, &zero_bindings)?;
 
         let mut row = Vec::with_capacity(n + 1);
         for j in 0..n {
             let mut bj = zero_bindings.clone();
             bj[j].1 = 1.0;
-            let ej = evaluate_numeric(pool, &bj, poly_expr)
-                .map_err(|_| KernelError::UnsupportedEquation {
-                    reason: "non-numeric coefficient in linear system".to_string(),
-                })?;
+            let ej = eval_at(pool, poly_expr, &bj)?;
             row.push(ej - const_val);
         }
+
+        // Verification probe 1: each variable in isolation must be linear.
+        // Evaluate at x_j = 2 (others = 0) and check against 2·a_j + b.
+        // This catches purely-univariate nonlinearities like x², x³, sin(x).
+        for j in 0..n {
+            let mut bj = zero_bindings.clone();
+            bj[j].1 = 2.0;
+            let probed = eval_at(pool, poly_expr, &bj)?;
+            let predicted = 2.0 * row[j] + const_val;
+            if !close(probed, predicted) {
+                return Err(KernelError::UnsupportedEquation {
+                    reason: format!(
+                        "equation {} is nonlinear in variable index {} \
+                         (probe at 2 yielded {}, linear model predicted {})",
+                        eq_idx, j, probed, predicted
+                    ),
+                });
+            }
+        }
+
+        // Verification probe 2: no cross-terms between any variable pair.
+        // Evaluate at x_i=1, x_k=1 (others=0) and check against a_i + a_k + b.
+        // This catches `x·y`, `x·(y+1)`, etc., which probe-1 misses because
+        // a single variable being 1 with the other 0 makes the product vanish.
+        for i in 0..n {
+            for k in (i + 1)..n {
+                let mut b_ik = zero_bindings.clone();
+                b_ik[i].1 = 1.0;
+                b_ik[k].1 = 1.0;
+                let probed = eval_at(pool, poly_expr, &b_ik)?;
+                let predicted = row[i] + row[k] + const_val;
+                if !close(probed, predicted) {
+                    return Err(KernelError::UnsupportedEquation {
+                        reason: format!(
+                            "equation {} contains a cross-term between \
+                             variable indices {} and {} \
+                             (probe at (1,1) yielded {}, linear model predicted {})",
+                            eq_idx, i, k, probed, predicted
+                        ),
+                    });
+                }
+            }
+        }
+
         row.push(-const_val);
         mat.push(row);
     }
@@ -453,6 +521,102 @@ mod tests {
         let eq = pool.eq_node(seven, four);
         let result = solve(&mut pool, eq, x).unwrap();
         assert!(result.solutions.is_empty());
+    }
+
+    // ---- solve_system ---------------------------------------------------
+
+    #[test]
+    fn solve_system_2x2_linear() {
+        // 2x + y = 5
+        //  x - y = 1   →  x = 2, y = 1
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let two = pool.small_int(2);
+        let neg_one = pool.small_int(-1);
+        let five = pool.small_int(5);
+        let one = pool.one;
+
+        let two_x = pool.mul(vec![two, x]);
+        let lhs1 = pool.add(vec![two_x, y]);
+        let eq1 = pool.eq_node(lhs1, five);
+
+        let neg_y = pool.mul(vec![neg_one, y]);
+        let lhs2 = pool.add(vec![x, neg_y]);
+        let eq2 = pool.eq_node(lhs2, one);
+
+        let result = solve_system(&mut pool, &[eq1, eq2], &[x, y]).unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        let binding = &result.solutions[0];
+        assert_eq!(binding.len(), 2);
+        let x_val = crate::evalnum::evaluate_numeric(&pool, &[], binding[0].1).unwrap();
+        let y_val = crate::evalnum::evaluate_numeric(&pool, &[], binding[1].1).unwrap();
+        assert!((x_val - 2.0).abs() < 1e-9);
+        assert!((y_val - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn solve_system_rejects_nonlinear_in_single_variable() {
+        // x^2 + y = 5,  x + y = 3
+        // Probing only at 0/1 would silently treat the first equation as
+        // `x + y = 5` (since 1^2 = 1) and produce wrong solutions. The
+        // probe-at-2 check catches this: at x=2,y=0 the eqn yields 4,
+        // but the linear model would predict 2·1 + 0 = 2.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let two_int = pool.small_int(2);
+        let three = pool.small_int(3);
+        let five = pool.small_int(5);
+
+        let x2 = pool.pow(x, two_int);
+        let lhs1 = pool.add(vec![x2, y]);
+        let eq1 = pool.eq_node(lhs1, five);
+
+        let lhs2 = pool.add(vec![x, y]);
+        let eq2 = pool.eq_node(lhs2, three);
+
+        let result = solve_system(&mut pool, &[eq1, eq2], &[x, y]);
+        match result {
+            Err(KernelError::UnsupportedEquation { reason }) => {
+                assert!(
+                    reason.contains("nonlinear"),
+                    "expected nonlinearity reason, got: {}", reason
+                );
+            }
+            other => panic!("expected UnsupportedEquation(nonlinear), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn solve_system_rejects_cross_term() {
+        // x·y = 1,  x + y = 3
+        // The probe-at-(1,1) check catches the cross-term: at x=1,y=1 the
+        // first equation yields 1, but probing each variable in isolation
+        // (x=1,y=0) and (x=0,y=1) both yield 0, so the linear model
+        // predicts 0 — mismatch.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let three = pool.small_int(3);
+        let one = pool.one;
+
+        let xy = pool.mul(vec![x, y]);
+        let eq1 = pool.eq_node(xy, one);
+
+        let lhs2 = pool.add(vec![x, y]);
+        let eq2 = pool.eq_node(lhs2, three);
+
+        let result = solve_system(&mut pool, &[eq1, eq2], &[x, y]);
+        match result {
+            Err(KernelError::UnsupportedEquation { reason }) => {
+                assert!(
+                    reason.contains("cross-term"),
+                    "expected cross-term reason, got: {}", reason
+                );
+            }
+            other => panic!("expected UnsupportedEquation(cross-term), got {:?}", other),
+        }
     }
 }
 
