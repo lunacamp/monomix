@@ -5,6 +5,7 @@ pub mod expr;
 pub mod parser;
 pub mod poly;
 pub mod simplify;
+pub mod solve;
 pub mod substitute;
 
 pub use diff::differentiate;
