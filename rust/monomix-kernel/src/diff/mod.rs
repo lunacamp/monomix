@@ -122,3 +122,48 @@ mod tests {
         assert_eq!(r1, r2);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::expr::ExprPool;
+    use crate::simplify::{simplify, SimplifierConfig, SimplifyCache};
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn diff_linearity(a in 1i64..10, b in 1i64..10) {
+            let mut pool = ExprPool::new();
+            let x = pool.symbol("x");
+            let a_int = pool.small_int(a);
+            let b_int = pool.small_int(b);
+            let ax = pool.mul(vec![a_int, x]);
+            let bx = pool.mul(vec![b_int, x]);
+            let sum = pool.add(vec![ax, bx]);
+            // d/dx(a*x + b*x) should equal (a+b)
+            let d = differentiate(&mut pool, sum, x).unwrap();
+            let config = SimplifierConfig::default();
+            let mut cache = SimplifyCache::new();
+            let simplified = simplify(&mut pool, d, &config, &mut cache);
+            let total = a + b;
+            let has_total = pool.fold(simplified, false, &mut |found, _id, node| {
+                found || matches!(node, crate::expr::ExprNode::SmallInt(n) if *n == total)
+            });
+            prop_assert!(has_total, "d/dx((a+b)*x) should produce {}", total);
+        }
+
+        #[test]
+        fn diff_leibniz_product_rule(n in 2u32..6u32) {
+            // d/dx(x^n) = n*x^(n-1)
+            let mut pool = ExprPool::new();
+            let x = pool.symbol("x");
+            let n_int = pool.small_int(n as i64);
+            let xn = pool.pow(x, n_int);
+            let d = differentiate(&mut pool, xn, x).unwrap();
+            let has_n = pool.fold(d, false, &mut |found, _id, node| {
+                found || matches!(node, crate::expr::ExprNode::SmallInt(k) if *k == n as i64)
+            });
+            prop_assert!(has_n, "d/dx x^{} should contain {} as coefficient", n, n);
+        }
+    }
+}

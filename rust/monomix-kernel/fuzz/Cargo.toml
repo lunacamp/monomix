@@ -23,3 +23,17 @@ path = "fuzz_targets/fuzz_parser.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_simplify"
+path = "fuzz_targets/fuzz_simplify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_diff"
+path = "fuzz_targets/fuzz_diff.rs"
+test = false
+doc = false
+bench = false

@@ -87,6 +87,25 @@ fn bench_expand_x_plus_1_pow_20(c: &mut Criterion) {
     });
 }
 
+use monomix_kernel::diff::differentiate;
+
+fn bench_diff_20_term_poly(c: &mut Criterion) {
+    c.bench_function("diff 20-term univariate poly", |b| {
+        b.iter(|| {
+            let mut pool = monomix_kernel::expr::ExprPool::new();
+            let x = pool.symbol("x");
+            let terms: Vec<_> = (0..20i64).map(|i| {
+                let coeff = pool.small_int(i + 1);
+                let exp_int = pool.small_int(20 - i);
+                let power = pool.pow(x, exp_int);
+                pool.mul(vec![coeff, power])
+            }).collect();
+            let poly = pool.add(terms);
+            black_box(differentiate(&mut pool, poly, x).unwrap());
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_intern_integers,
@@ -95,5 +114,6 @@ criterion_group!(
     bench_parse_100_term_poly,
     bench_parse_20_assignments,
     bench_expand_x_plus_1_pow_20,
+    bench_diff_20_term_poly,
 );
 criterion_main!(benches);
