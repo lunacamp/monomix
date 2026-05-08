@@ -105,7 +105,139 @@ fn view_mut_impl(pool: &mut ExprPool, expr: ExprId, var: ExprId) -> Result<UnivP
 }
 
 fn remove_zero_terms(pool: &ExprPool, poly: &mut UnivPoly) {
-    poly.retain(|t| !pool.is_zero(t.coeff));
+    poly.retain(|t| !is_numerically_zero(pool, t.coeff));
+}
+
+/// Recursively check if a coefficient ExprId evaluates to zero.
+///
+/// Handles literal zero, Neg(zero), and Add/Mul nodes whose structural
+/// numeric value sums/products to zero. This is needed because the pool
+/// only deduplicates by identity — `Add(Neg(one), one)` is a distinct
+/// node from `pool.zero` even though it equals zero arithmetically.
+///
+/// Returns false on non-numeric (symbolic) coefficients to avoid
+/// dropping legitimate terms.
+fn is_numerically_zero(pool: &ExprPool, id: ExprId) -> bool {
+    if pool.is_zero(id) { return true; }
+    match numeric_eval(pool, id) {
+        Some(NumericVal::Int(n)) => n == 0,
+        Some(NumericVal::Rat(p, _q)) => p == 0,
+        Some(NumericVal::Float(f)) => f == 0.0,
+        None => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NumericVal {
+    Int(i128),
+    Rat(i128, i128), // p/q, q > 0
+    Float(f64),
+}
+
+/// Try to evaluate `id` to a numeric value if it's a closed-form numeric
+/// expression (atoms + Add/Mul/Neg/Pow over numerics). Returns None if
+/// any subterm is non-numeric or if values overflow i128 reasoning.
+fn numeric_eval(pool: &ExprPool, id: ExprId) -> Option<NumericVal> {
+    match pool.get(id) {
+        ExprNode::SmallInt(n) => Some(NumericVal::Int(*n as i128)),
+        ExprNode::BigInt(_) => None, // out-of-range: skip
+        ExprNode::Rational(b) => {
+            let p = b.0.to_string().parse::<i128>().ok()?;
+            let q = b.1.to_string().parse::<i128>().ok()?;
+            Some(NumericVal::Rat(p, q))
+        }
+        ExprNode::Float(f) => Some(NumericVal::Float(f.0)),
+        ExprNode::Neg(x) => Some(neg_numeric(numeric_eval(pool, *x)?)),
+        ExprNode::Add(children) => {
+            let mut acc = NumericVal::Int(0);
+            for &c in children.iter() {
+                acc = add_numeric(acc, numeric_eval(pool, c)?)?;
+            }
+            Some(acc)
+        }
+        ExprNode::Mul(children) => {
+            let mut acc = NumericVal::Int(1);
+            for &c in children.iter() {
+                acc = mul_numeric(acc, numeric_eval(pool, c)?)?;
+            }
+            Some(acc)
+        }
+        _ => None,
+    }
+}
+
+fn neg_numeric(v: NumericVal) -> NumericVal {
+    match v {
+        NumericVal::Int(n) => NumericVal::Int(-n),
+        NumericVal::Rat(p, q) => NumericVal::Rat(-p, q),
+        NumericVal::Float(f) => NumericVal::Float(-f),
+    }
+}
+
+fn add_numeric(a: NumericVal, b: NumericVal) -> Option<NumericVal> {
+    match (a, b) {
+        (NumericVal::Int(x), NumericVal::Int(y)) => x.checked_add(y).map(NumericVal::Int),
+        (NumericVal::Float(x), NumericVal::Float(y)) => Some(NumericVal::Float(x + y)),
+        (NumericVal::Float(x), other) | (other, NumericVal::Float(x)) => {
+            let y = numeric_to_f64(other);
+            Some(NumericVal::Float(x + y))
+        }
+        (a, b) => {
+            let (ap, aq) = numeric_to_rat(a);
+            let (bp, bq) = numeric_to_rat(b);
+            let p = ap.checked_mul(bq)?.checked_add(bp.checked_mul(aq)?)?;
+            let q = aq.checked_mul(bq)?;
+            Some(simplify_rat(p, q))
+        }
+    }
+}
+
+fn mul_numeric(a: NumericVal, b: NumericVal) -> Option<NumericVal> {
+    match (a, b) {
+        (NumericVal::Int(x), NumericVal::Int(y)) => x.checked_mul(y).map(NumericVal::Int),
+        (NumericVal::Float(x), NumericVal::Float(y)) => Some(NumericVal::Float(x * y)),
+        (NumericVal::Float(x), other) | (other, NumericVal::Float(x)) => {
+            let y = numeric_to_f64(other);
+            Some(NumericVal::Float(x * y))
+        }
+        (a, b) => {
+            let (ap, aq) = numeric_to_rat(a);
+            let (bp, bq) = numeric_to_rat(b);
+            let p = ap.checked_mul(bp)?;
+            let q = aq.checked_mul(bq)?;
+            Some(simplify_rat(p, q))
+        }
+    }
+}
+
+fn numeric_to_rat(v: NumericVal) -> (i128, i128) {
+    match v {
+        NumericVal::Int(n) => (n, 1),
+        NumericVal::Rat(p, q) => (p, q),
+        NumericVal::Float(_) => unreachable!("numeric_to_rat called on Float"),
+    }
+}
+
+fn numeric_to_f64(v: NumericVal) -> f64 {
+    match v {
+        NumericVal::Int(n) => n as f64,
+        NumericVal::Rat(p, q) => p as f64 / q as f64,
+        NumericVal::Float(f) => f,
+    }
+}
+
+fn simplify_rat(p: i128, q: i128) -> NumericVal {
+    if q == 0 { return NumericVal::Int(0); } // shouldn't happen in valid input
+    if p == 0 { return NumericVal::Int(0); }
+    let (p, q) = if q < 0 { (-p, -q) } else { (p, q) };
+    let g = gcd_i128(p.unsigned_abs(), q.unsigned_abs()) as i128;
+    let p = p / g;
+    let q = q / g;
+    if q == 1 { NumericVal::Int(p) } else { NumericVal::Rat(p, q) }
+}
+
+fn gcd_i128(a: u128, b: u128) -> u128 {
+    if b == 0 { a } else { gcd_i128(b, a % b) }
 }
 
 /// Merge two polys by summing same-exponent terms via `pool.add`.
@@ -188,6 +320,183 @@ fn collect_symbols(pool: &ExprPool, expr: ExprId) -> Vec<ExprId> {
     syms
 }
 
+// ===========================================================================
+// Task 14: polynomial arithmetic + surface ops
+// ===========================================================================
+
+/// Add two polynomials, combining like terms via pool.
+pub fn poly_add(pool: &mut ExprPool, a: &UnivPoly, b: &UnivPoly) -> UnivPoly {
+    let mut result: UnivPoly = a.to_vec();
+    for tb in b {
+        if let Some(ta) = result.iter_mut().find(|t| t.exp == tb.exp) {
+            ta.coeff = pool.add(vec![ta.coeff, tb.coeff]);
+        } else {
+            result.push(tb.clone());
+        }
+    }
+    result.sort_by(|a, b| b.exp.cmp(&a.exp));
+    remove_zero_terms(pool, &mut result);
+    result
+}
+
+pub fn poly_sub(pool: &mut ExprPool, a: &UnivPoly, b: &UnivPoly) -> UnivPoly {
+    let neg_b: UnivPoly = b.iter().map(|t| Term { exp: t.exp, coeff: pool.neg(t.coeff) }).collect();
+    poly_add(pool, a, &neg_b)
+}
+
+pub fn poly_mul(pool: &mut ExprPool, a: &UnivPoly, b: &UnivPoly) -> UnivPoly {
+    let mut result: UnivPoly = Vec::new();
+    for ta in a {
+        for tb in b {
+            let exp = ta.exp + tb.exp;
+            let coeff = pool.mul(vec![ta.coeff, tb.coeff]);
+            if let Some(t) = result.iter_mut().find(|t| t.exp == exp) {
+                t.coeff = pool.add(vec![t.coeff, coeff]);
+            } else {
+                result.push(Term { exp, coeff });
+            }
+        }
+    }
+    result.sort_by(|a, b| b.exp.cmp(&a.exp));
+    remove_zero_terms(pool, &mut result);
+    result
+}
+
+#[derive(Debug)]
+pub enum DivError {
+    DivisionByZero,
+}
+
+/// Euclidean polynomial division: f = q*g + r, deg(r) < deg(g).
+pub fn poly_div(pool: &mut ExprPool, f: &UnivPoly, g: &UnivPoly) -> Result<(UnivPoly, UnivPoly), DivError> {
+    if g.is_empty() || (g.len() == 1 && pool.is_zero(g[0].coeff)) {
+        return Err(DivError::DivisionByZero);
+    }
+    let mut remainder = f.to_vec();
+    let mut quotient: UnivPoly = Vec::new();
+    let g_lead_exp = g[0].exp;
+    let g_lead_coeff = g[0].coeff;
+
+    while !remainder.is_empty() && remainder[0].exp >= g_lead_exp {
+        let r_lead = remainder[0].clone();
+        let exp = r_lead.exp - g_lead_exp;
+        let coeff = pool.div(r_lead.coeff, g_lead_coeff);
+        quotient.push(Term { exp, coeff });
+        let factor = vec![Term { exp, coeff }];
+        let sub = poly_mul(pool, &factor, g);
+        remainder = poly_sub(pool, &remainder, &sub);
+    }
+    quotient.sort_by(|a, b| b.exp.cmp(&a.exp));
+    remove_zero_terms(pool, &mut remainder);
+    Ok((quotient, remainder))
+}
+
+const EXPAND_POW_LIMIT: u32 = 100;
+
+/// Distribute products and powers: (a+b)^n -> sum of terms.
+pub fn expand(pool: &mut ExprPool, expr: ExprId) -> ExprId {
+    let node = pool.get(expr).clone();
+    match node {
+        ExprNode::Add(children) => {
+            let ids: Vec<ExprId> = children.to_vec();
+            let expanded: Vec<ExprId> = ids.iter().map(|&c| expand(pool, c)).collect();
+            pool.add(expanded)
+        }
+        ExprNode::Mul(children) => {
+            let ids: Vec<ExprId> = children.to_vec();
+            let expanded: Vec<ExprId> = ids.iter().map(|&c| expand(pool, c)).collect();
+            expand_mul(pool, &expanded)
+        }
+        ExprNode::Pow(base, exp) => {
+            if let ExprNode::SmallInt(n) = pool.get(exp).clone() {
+                if n >= 0 && n <= EXPAND_POW_LIMIT as i64 {
+                    let base_expanded = expand(pool, base);
+                    return expand_pow(pool, base_expanded, n as u32);
+                }
+            }
+            let base2 = expand(pool, base);
+            let exp2 = expand(pool, exp);
+            pool.pow(base2, exp2)
+        }
+        ExprNode::Neg(x) => {
+            let x2 = expand(pool, x);
+            pool.neg(x2)
+        }
+        _ => expr,
+    }
+}
+
+fn expand_mul(pool: &mut ExprPool, factors: &[ExprId]) -> ExprId {
+    if factors.is_empty() { return pool.one; }
+    if factors.len() == 1 { return factors[0]; }
+    let rest = expand_mul(pool, &factors[1..]);
+    let lhs = factors[0];
+    match pool.get(rest).clone() {
+        ExprNode::Add(children) => {
+            let ids: Vec<ExprId> = children.to_vec();
+            let terms: Vec<ExprId> = ids.iter().map(|&c| pool.mul(vec![lhs, c])).collect();
+            pool.add(terms)
+        }
+        _ => match pool.get(lhs).clone() {
+            ExprNode::Add(children) => {
+                let ids: Vec<ExprId> = children.to_vec();
+                let terms: Vec<ExprId> = ids.iter().map(|&c| pool.mul(vec![c, rest])).collect();
+                pool.add(terms)
+            }
+            _ => pool.mul(vec![lhs, rest]),
+        }
+    }
+}
+
+fn expand_pow(pool: &mut ExprPool, base: ExprId, n: u32) -> ExprId {
+    if n == 0 { return pool.one; }
+    if n == 1 { return base; }
+    // Repeated squaring
+    let half = expand_pow(pool, base, n / 2);
+    let squared = expand_mul(pool, &[half, half]);
+    if n % 2 == 0 {
+        squared
+    } else {
+        expand_mul(pool, &[squared, base])
+    }
+}
+
+pub fn deg(pool: &mut ExprPool, expr: ExprId, var: ExprId) -> Option<u32> {
+    view_mut(pool, expr, var).ok().map(|p| p.first().map(|t| t.exp).unwrap_or(0))
+}
+
+pub fn coeff(pool: &mut ExprPool, expr: ExprId, var: ExprId, n: u32) -> ExprId {
+    match view_mut(pool, expr, var) {
+        Ok(poly) => poly.iter().find(|t| t.exp == n).map(|t| t.coeff).unwrap_or(pool.zero),
+        Err(_) => pool.zero,
+    }
+}
+
+pub fn collect_var(pool: &mut ExprPool, expr: ExprId, var: ExprId) -> ExprId {
+    match view_mut(pool, expr, var) {
+        Ok(poly) => to_expr(pool, &poly, var),
+        Err(_) => expr,
+    }
+}
+
+/// GCD of two polynomials (Euclidean). Used when SimplifierConfig::gcd = true.
+pub fn poly_gcd(pool: &mut ExprPool, f: &UnivPoly, g: &UnivPoly) -> UnivPoly {
+    if f.is_empty() { return g.to_vec(); }
+    if g.is_empty() { return f.to_vec(); }
+    let mut a = f.to_vec();
+    let mut b = g.to_vec();
+    loop {
+        match poly_div(pool, &a, &b) {
+            Ok((_, r)) if r.is_empty() => return b,
+            Ok((_, r)) => { a = b; b = r; }
+            Err(_) => {
+                let one = pool.one;
+                return vec![Term { exp: 0, coeff: one }];
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +561,77 @@ mod tests {
         let reconstructed = to_expr(&mut pool, &poly, x);
         let poly2 = view_mut(&mut pool, reconstructed, x).expect("roundtrip should still view");
         assert_eq!(poly.len(), poly2.len());
+    }
+
+    #[test]
+    fn poly_add_merges_like_terms() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        // (x^2 + x) + (x^2 + 1) = 2*x^2 + x + 1
+        let two_int = pool.small_int(2);
+        let x2_a = pool.pow(x, two_int);
+        let a_expr = pool.add(vec![x2_a, x]);
+        let a = view_mut(&mut pool, a_expr, x).unwrap();
+
+        let two_int2 = pool.small_int(2);
+        let x2_b = pool.pow(x, two_int2);
+        let one = pool.one;
+        let b_expr = pool.add(vec![x2_b, one]);
+        let b = view_mut(&mut pool, b_expr, x).unwrap();
+
+        let sum = poly_add(&mut pool, &a, &b);
+        assert_eq!(sum.len(), 3); // x^2, x, 1
+        assert_eq!(sum[0].exp, 2);
+    }
+
+    #[test]
+    fn poly_mul_degree_sum() {
+        let mut pool = ExprPool::new();
+        // (x + 1) * (x - 1) = x^2 - 1
+        let one = pool.one;
+        let neg_one = pool.neg(one);
+        let a = vec![Term { exp: 1, coeff: one }, Term { exp: 0, coeff: one }];
+        let b = vec![Term { exp: 1, coeff: one }, Term { exp: 0, coeff: neg_one }];
+        let prod = poly_mul(&mut pool, &a, &b);
+        assert_eq!(prod.len(), 2); // x^2 and constant
+        assert_eq!(prod[0].exp, 2);
+    }
+
+    #[test]
+    fn poly_div_exact() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        // (x^2 - 1) / (x - 1) = (x + 1) with remainder 0
+        let two_int = pool.small_int(2);
+        let x2 = pool.pow(x, two_int);
+        let one = pool.one;
+        let neg_one = pool.neg(one);
+        let f_expr = pool.add(vec![x2, neg_one]); // x^2 - 1
+        let f = view_mut(&mut pool, f_expr, x).unwrap();
+
+        let neg_one_id = pool.neg(one);
+        let g = vec![
+            Term { exp: 1, coeff: one },
+            Term { exp: 0, coeff: neg_one_id },
+        ];
+        let (q, r) = poly_div(&mut pool, &f, &g).unwrap();
+        assert_eq!(r.len(), 0, "remainder should be zero");
+        assert_eq!(q.len(), 2, "quotient should be x + 1");
+    }
+
+    #[test]
+    fn expand_distributes() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let one = pool.one;
+        // (x + 1)^2 = x^2 + 2*x + 1
+        let x_plus_1 = pool.add(vec![x, one]);
+        let two_int = pool.small_int(2);
+        let expr = pool.pow(x_plus_1, two_int);
+        let expanded = expand(&mut pool, expr);
+        let poly = view_mut(&mut pool, expanded, x).unwrap();
+        assert!(poly.iter().any(|t| t.exp == 2));
+        assert!(poly.iter().any(|t| t.exp == 1));
+        assert!(poly.iter().any(|t| t.exp == 0));
     }
 }
