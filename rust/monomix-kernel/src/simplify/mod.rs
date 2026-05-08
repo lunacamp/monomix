@@ -84,6 +84,33 @@ mod tests {
         // x * x → x^2
         assert!(matches!(pool.get(result), ExprNode::Pow(_, _)));
     }
+
+    #[test]
+    fn simplify_constant_fold_subtraction_via_parser() {
+        // Regression: the parser lowers `10 - 3` to `Add([10, Neg(3)])`,
+        // and previously `fold_numeric` bailed because `Neg(_)` wasn't
+        // recognized as a numeric atom inside the accumulation loop.
+        let mut pool = ExprPool::new();
+        let result = crate::parser::parse("10 - 3;", &mut pool);
+        assert_eq!(result.diagnostics.len(), 0);
+        assert_eq!(result.statements.len(), 1);
+        let config = SimplifierConfig::default();
+        let mut cache = SimplifyCache::new();
+        let folded = simplify(&mut pool, result.statements[0].expr, &config, &mut cache);
+        assert_eq!(pool.get(folded), &ExprNode::SmallInt(7));
+    }
+
+    #[test]
+    fn simplify_constant_fold_neg_factor_via_parser() {
+        // `2 * -3` lowers through Pratt's prefix Minus into `Mul([2, Neg(3)])`.
+        let mut pool = ExprPool::new();
+        let result = crate::parser::parse("2 * -3;", &mut pool);
+        assert_eq!(result.diagnostics.len(), 0);
+        let config = SimplifierConfig::default();
+        let mut cache = SimplifyCache::new();
+        let folded = simplify(&mut pool, result.statements[0].expr, &config, &mut cache);
+        assert_eq!(pool.get(folded), &ExprNode::SmallInt(-6));
+    }
 }
 
 #[cfg(test)]
