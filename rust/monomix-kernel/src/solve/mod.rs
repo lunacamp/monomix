@@ -5,6 +5,18 @@ use crate::simplify::{simplify, SimplifierConfig, SimplifyCache};
 
 pub type Substitution = Vec<(ExprId, ExprId)>;
 
+/// The result of solving an equation (or system) for one or more variables.
+///
+/// `solutions` contains one `Substitution` per **distinct** solution.
+/// Multiplicity is not encoded — a quadratic with a double root returns
+/// exactly one substitution, matching the convention used by Mathematica's
+/// `Solve` and SymPy's `solve`. A truly empty `solutions` means the equation
+/// has no solutions in the represented domain (e.g. real-only quadratic with
+/// negative discriminant — see `has_complex_roots`).
+///
+/// A single empty substitution (`vec![vec![]]`) is the conventional
+/// encoding for a tautology (e.g. `0 = 0`) — every value of the variable
+/// satisfies the equation.
 #[derive(Debug)]
 pub struct SolutionSet {
     pub solutions: Vec<Substitution>,
@@ -35,8 +47,23 @@ pub fn solve(
             reason: "expression is not polynomial in the given variable".to_string(),
         }),
         Some(0) => {
-            // Constant — either always true (0=0) or never (c=0 for c!=0)
-            Ok(SolutionSet { solutions: vec![], has_complex_roots: false })
+            // The polynomial is constant in `var`. We must distinguish:
+            //   - tautology  (0 = 0)        — every value of `var` satisfies it
+            //   - contradiction (c = 0, c != 0) — no value of `var` satisfies it
+            //
+            // Encoding: a single empty substitution stands for "any value of
+            // `var` works" (tautology); an empty solutions list stands for
+            // "no value works" (contradiction). This mirrors Mathematica's
+            // `Solve[{0 == 0}, x]` returning `{{}}` and `Solve[{1 == 0}, x]`
+            // returning `{}`.
+            let config = SimplifierConfig::default();
+            let mut cache = SimplifyCache::new();
+            let constant = simplify(pool, poly_expr, &config, &mut cache);
+            if pool.is_zero(constant) {
+                Ok(SolutionSet { solutions: vec![vec![]], has_complex_roots: false })
+            } else {
+                Ok(SolutionSet { solutions: vec![], has_complex_roots: false })
+            }
         }
         Some(1) => solve_linear(pool, poly_expr, var),
         Some(2) => solve_quadratic(pool, poly_expr, var),
@@ -104,14 +131,18 @@ fn solve_quadratic(
             return Ok(SolutionSet { solutions: vec![], has_complex_roots: true });
         }
         if disc_val == 0.0 {
-            // One root (double): x = -b / (2a)
+            // Double root: x = -b / (2a). Returned once — `SolutionSet`
+            // does not encode multiplicity, matching the convention used
+            // by Mathematica's `Solve` and SymPy's `solve`. Callers that
+            // need to know about multiplicity should inspect the
+            // discriminant directly.
             let two_int2 = pool.small_int(2);
             let two_a = pool.mul(vec![two_int2, a]);
             let neg_b_local = pool.neg(b);
             let val = pool.div(neg_b_local, two_a);
             let s = simplify(pool, val, &config, &mut cache);
             return Ok(SolutionSet {
-                solutions: vec![vec![(var, s)], vec![(var, s)]],
+                solutions: vec![vec![(var, s)]],
                 has_complex_roots: false,
             });
         }
@@ -328,6 +359,100 @@ mod tests {
         let eq = pool.eq_node(x3, one);
         let result = solve(&mut pool, eq, x);
         assert!(matches!(result, Err(KernelError::UnsupportedEquation { .. })));
+    }
+
+    #[test]
+    fn solve_tautology_zero_equals_zero() {
+        // 0 = 0: every x is a solution. Encoded as one empty substitution.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let zero = pool.zero;
+        let eq = pool.eq_node(zero, zero);
+        let result = solve(&mut pool, eq, x).unwrap();
+        assert!(!result.has_complex_roots);
+        assert_eq!(
+            result.solutions.len(),
+            1,
+            "tautology should produce exactly one (empty) substitution"
+        );
+        assert!(
+            result.solutions[0].is_empty(),
+            "tautology's substitution must not bind `var`; got {:?}",
+            result.solutions[0]
+        );
+    }
+
+    #[test]
+    fn solve_tautology_after_simplify() {
+        // 5 = 5: rearranged to `5 - 5 = 0`, simplifies to 0, so it's a tautology.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let five = pool.small_int(5);
+        let eq = pool.eq_node(five, five);
+        let result = solve(&mut pool, eq, x).unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert!(result.solutions[0].is_empty());
+    }
+
+    #[test]
+    fn solve_contradiction_nonzero_constant() {
+        // 5 = 0: no x satisfies it.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let zero = pool.zero;
+        let five = pool.small_int(5);
+        let eq = pool.eq_node(five, zero);
+        let result = solve(&mut pool, eq, x).unwrap();
+        assert!(!result.has_complex_roots);
+        assert!(
+            result.solutions.is_empty(),
+            "contradiction must have no solutions"
+        );
+    }
+
+    #[test]
+    fn solve_quadratic_double_root_returns_single_solution() {
+        // x^2 - 4x + 4 = (x - 2)^2 = 0 has the double root x = 2.
+        // SolutionSet does not encode multiplicity, so we expect exactly
+        // one substitution (regression: previously returned two identical
+        // copies, misleading downstream code that expected unique roots).
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let zero = pool.zero;
+        let two_int = pool.small_int(2);
+        let four = pool.small_int(4);
+        let neg_four = pool.small_int(-4);
+        let x2 = pool.pow(x, two_int);
+        let neg_four_x = pool.mul(vec![neg_four, x]);
+        let poly = pool.add(vec![x2, neg_four_x, four]);
+        let eq = pool.eq_node(poly, zero);
+        let result = solve(&mut pool, eq, x).unwrap();
+        assert!(!result.has_complex_roots);
+        assert_eq!(
+            result.solutions.len(),
+            1,
+            "double root must return one substitution, not duplicates"
+        );
+        let binding = &result.solutions[0];
+        assert_eq!(binding.len(), 1);
+        assert_eq!(binding[0].0, x);
+        // Value check via numeric eval — robust to whichever symbolic form
+        // the simplifier leaves behind for `-(-4) / (2 * 1)`.
+        let val = crate::evalnum::evaluate_numeric(&pool, &[], binding[0].1)
+            .expect("double-root value should be numerically evaluable");
+        assert_eq!(val, 2.0);
+    }
+
+    #[test]
+    fn solve_contradiction_after_simplify() {
+        // 7 = 4: rearranged to `7 - 4 = 0`, simplifies to 3 (nonzero) → no solutions.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let seven = pool.small_int(7);
+        let four = pool.small_int(4);
+        let eq = pool.eq_node(seven, four);
+        let result = solve(&mut pool, eq, x).unwrap();
+        assert!(result.solutions.is_empty());
     }
 }
 
