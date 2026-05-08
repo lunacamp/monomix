@@ -9,8 +9,18 @@ use crate::parser::expr::{BuiltinIds, ExprParser};
 use crate::parser::lexer::Lexer;
 use rustc_hash::FxHashMap;
 
-/// Parse `source` and intern produced expressions into `pool`.
-/// Never panics; all errors flow through `ParseResult.diagnostics`.
+/// Parse `source` into a list of `Stmt`s, interning expressions into `pool`.
+///
+/// Never panics; all errors flow through `ParseResult.diagnostics`. Single
+/// statements that fail to parse are dropped via `synchronise()`-based
+/// recovery — subsequent statements are still attempted.
+///
+/// **Trailing `;`/`$` is optional.** If the final statement lacks a terminator,
+/// it's accepted with `OutputMode::Display` and `Span::SYNTHETIC` for the
+/// statement's terminator span. This mirrors REPL convention where the last
+/// fragment may not have a trailing terminator yet. Embedded statements
+/// (anywhere except the final one) DO require an explicit `;` or `$`; missing
+/// terminators there emit `DiagnosticCode::UnterminatedStatement`.
 pub fn parse(source: &str, pool: &mut ExprPool) -> ParseResult {
     let builtins = BuiltinIds::new(pool);
     let mut parser = ExprParser {
