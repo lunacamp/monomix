@@ -71,6 +71,22 @@ fn bench_parse_20_assignments(c: &mut Criterion) {
     });
 }
 
+use monomix_kernel::poly::expand;
+
+fn bench_expand_x_plus_1_pow_20(c: &mut Criterion) {
+    c.bench_function("expand (x+1)^20", |b| {
+        b.iter(|| {
+            let mut pool = monomix_kernel::expr::ExprPool::new();
+            let x = pool.symbol("x");
+            let one = pool.one;
+            let base = pool.add(vec![x, one]);
+            let twenty = pool.small_int(20);
+            let expr = pool.pow(base, twenty);
+            black_box(expand(&mut pool, expr));
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_intern_integers,
@@ -78,5 +94,6 @@ criterion_group!(
     bench_map_bottom_up_identity,
     bench_parse_100_term_poly,
     bench_parse_20_assignments,
+    bench_expand_x_plus_1_pow_20,
 );
 criterion_main!(benches);

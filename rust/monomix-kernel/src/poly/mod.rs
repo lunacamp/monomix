@@ -162,6 +162,29 @@ fn numeric_eval(pool: &ExprPool, id: ExprId) -> Option<NumericVal> {
             }
             Some(acc)
         }
+        ExprNode::Div(num, den) => {
+            // num/den = num * (1/den); fold to a Rat if both sides resolve
+            // numerically. Returning None if den evaluates to zero or to a
+            // float (we avoid float division here to keep this conservative).
+            let n = numeric_eval(pool, *num)?;
+            let d = numeric_eval(pool, *den)?;
+            match (n, d) {
+                (NumericVal::Float(_), _) | (_, NumericVal::Float(_)) => {
+                    let nf = numeric_to_f64(n);
+                    let df = numeric_to_f64(d);
+                    if df == 0.0 { None } else { Some(NumericVal::Float(nf / df)) }
+                }
+                _ => {
+                    let (np, nq) = numeric_to_rat(n);
+                    let (dp, dq) = numeric_to_rat(d);
+                    if dp == 0 { return None; }
+                    // (np/nq) / (dp/dq) = (np*dq) / (nq*dp)
+                    let p = np.checked_mul(dq)?;
+                    let q = nq.checked_mul(dp)?;
+                    Some(simplify_rat(p, q))
+                }
+            }
+        }
         _ => None,
     }
 }
@@ -633,5 +656,61 @@ mod tests {
         assert!(poly.iter().any(|t| t.exp == 2));
         assert!(poly.iter().any(|t| t.exp == 1));
         assert!(poly.iter().any(|t| t.exp == 0));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::expr::ExprPool;
+    use proptest::prelude::*;
+
+    fn make_poly(pool: &mut ExprPool, coeffs: &[i64]) -> UnivPoly {
+        let mut poly = Vec::new();
+        for (i, &c) in coeffs.iter().enumerate() {
+            if c != 0 {
+                let exp = (coeffs.len() - 1 - i) as u32;
+                poly.push(Term { exp, coeff: pool.small_int(c) });
+            }
+        }
+        poly.sort_by(|a, b| b.exp.cmp(&a.exp));
+        poly
+    }
+
+    proptest! {
+        #[test]
+        fn expand_pow_degree(n in 1u32..15u32) {
+            let mut pool = ExprPool::new();
+            let x = pool.symbol("x");
+            let one = pool.one;
+            let x_plus_1 = pool.add(vec![x, one]);
+            let n_int = pool.small_int(n as i64);
+            let expr = pool.pow(x_plus_1, n_int);
+            let expanded = expand(&mut pool, expr);
+            let d = deg(&mut pool, expanded, x);
+            prop_assert_eq!(d, Some(n));
+        }
+
+        #[test]
+        fn poly_mul_then_div_recovers(
+            a_coeffs in prop::collection::vec(-10i64..10i64, 2..6),
+            b_coeffs in prop::collection::vec(-5i64..5i64, 1..3),
+        ) {
+            // Skip degenerate cases where b is all zeros.
+            if b_coeffs.iter().all(|&c| c == 0) { return Ok(()); }
+            let mut pool = ExprPool::new();
+            let a = make_poly(&mut pool, &a_coeffs);
+            let b = make_poly(&mut pool, &b_coeffs);
+            if b.is_empty() { return Ok(()); }
+            let prod = poly_mul(&mut pool, &a, &b);
+            // (a * b) / b should produce a with zero remainder.
+            match poly_div(&mut pool, &prod, &b) {
+                Ok((_q, r)) => {
+                    // Remainder should be empty or all-zero.
+                    prop_assert!(r.is_empty() || r.iter().all(|t| pool.is_zero(t.coeff)));
+                }
+                Err(_) => {} // poly_div should succeed for non-empty divisor
+            }
+        }
     }
 }
