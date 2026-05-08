@@ -211,8 +211,9 @@ impl<'s, 'p> ExprParser<'s, 'p> {
 
     fn parse_ident_or_call(&mut self, ident_span: Span) -> Result<ExprId, ()> {
         let raw = &self.src[ident_span.start as usize..ident_span.end as usize];
-        let lower = raw.to_lowercase();
-        let name = self.pool.intern_str_pub(&lower);
+        // `intern_str_pub` lowercases internally — pass the raw slice to
+        // avoid a redundant `to_lowercase()` allocation on every identifier.
+        let name = self.pool.intern_str_pub(raw);
 
         if self.lexer.peek_kind() != TokenKind::LParen {
             let id = self.pool.symbol_by_id(name);

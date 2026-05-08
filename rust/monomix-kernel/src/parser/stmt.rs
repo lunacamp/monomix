@@ -40,8 +40,10 @@ impl<'s, 'p> ExprParser<'s, 'p> {
     fn parse_assign_stmt(&mut self, start_span: Span) -> Option<Stmt> {
         let (ident_tok, _ident_span) = self.lexer.next(); // IDENT
         let name = if let Token::Ident(s) = ident_tok {
+            // `intern_str_pub` lowercases internally — pass the raw slice
+            // directly to avoid a redundant `to_lowercase()` allocation.
             let raw = &self.src[s.start as usize..s.end as usize];
-            self.pool.intern_str_pub(&raw.to_lowercase())
+            self.pool.intern_str_pub(raw)
         } else { unreachable!("expected Ident — guarded by is_assign check") };
         self.lexer.next(); // ':='
         let expr = match self.parse_expr(0) {
