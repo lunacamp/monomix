@@ -14,6 +14,11 @@ pub enum ViewError {
     NonIntegerExponent,
     NegativeExponent,
     DivisionByVariable,
+    /// Exponent is a non-negative integer but exceeds `u32::MAX` — the
+    /// polynomial view stores exponents as `u32`, so anything larger
+    /// can't be represented faithfully. Returning this instead of
+    /// silently truncating prevents wildly wrong polynomial degrees.
+    ExponentTooLarge,
 }
 
 /// Attempt to view `expr` as a univariate polynomial in `var`.
@@ -75,10 +80,23 @@ fn view_mut_impl(pool: &mut ExprPool, expr: ExprId, var: ExprId) -> Result<UnivP
             if base == var {
                 match pool.get(exp).clone() {
                     ExprNode::SmallInt(n) if n >= 0 => {
+                        // Bounds-check before the `u32` cast. `n: i64` can hold
+                        // values up to ~9.2e18, but `Term::exp: u32` caps at
+                        // ~4.29e9 — any larger value would silently wrap (e.g.
+                        // `x^5_000_000_000` would record `exp = 705_032_704`).
+                        if n > u32::MAX as i64 {
+                            return Err(ViewError::ExponentTooLarge);
+                        }
                         let one = pool.one;
                         return Ok(vec![Term { exp: n as u32, coeff: one }]);
                     }
                     ExprNode::SmallInt(_) => return Err(ViewError::NegativeExponent),
+                    // A `BigInt` exponent is an integer (so calling it
+                    // `NonIntegerExponent` would lie); it's just too large
+                    // for `Term::exp`. The pool narrows BigInts that fit
+                    // `i64` back to `SmallInt`, so any live `BigInt` node
+                    // already exceeds `i64::MAX` — and therefore `u32::MAX`.
+                    ExprNode::BigInt(_) => return Err(ViewError::ExponentTooLarge),
                     _ => return Err(ViewError::NonIntegerExponent),
                 }
             }
@@ -656,6 +674,71 @@ mod tests {
         assert!(poly.iter().any(|t| t.exp == 2));
         assert!(poly.iter().any(|t| t.exp == 1));
         assert!(poly.iter().any(|t| t.exp == 0));
+    }
+
+    // ---- exponent bounds checking ----------------------------------------
+
+    #[test]
+    fn view_pow_at_u32_max_exponent_succeeds() {
+        // x^(u32::MAX) is right at the boundary of representable exponents.
+        // Must succeed and record the exponent exactly.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let exp = pool.small_int(u32::MAX as i64);
+        let expr = pool.pow(x, exp);
+        let poly = view_mut(&mut pool, expr, x).unwrap();
+        assert_eq!(poly.len(), 1);
+        assert_eq!(poly[0].exp, u32::MAX);
+    }
+
+    #[test]
+    fn view_pow_above_u32_max_errors_not_truncates() {
+        // x^(u32::MAX + 1) would silently wrap to x^0 under `n as u32`.
+        // The bounds check must intercept this and return an error.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let exp = pool.small_int(u32::MAX as i64 + 1);
+        let expr = pool.pow(x, exp);
+        match view_mut(&mut pool, expr, x) {
+            Err(ViewError::ExponentTooLarge) => {}
+            other => panic!("expected ExponentTooLarge, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn view_pow_far_above_u32_max_errors() {
+        // The reviewer's example: x^5_000_000_000. Pre-fix, `n as u32` would
+        // produce exp = 705_032_704 (5e9 mod 2^32) — silent miscompile.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let exp = pool.small_int(5_000_000_000);
+        let expr = pool.pow(x, exp);
+        assert!(matches!(
+            view_mut(&mut pool, expr, x),
+            Err(ViewError::ExponentTooLarge)
+        ));
+        // Also confirm `deg()` (the public façade) returns None instead of
+        // a wrong number — `view_mut(...).ok().map(...)` propagates the
+        // error as `None`, which is the right user-visible behavior.
+        assert_eq!(deg(&mut pool, expr, x), None);
+    }
+
+    #[test]
+    fn view_pow_with_bigint_exponent_errors_as_too_large() {
+        // BigInt exponents are integers (not "non-integer"). Reclassify as
+        // ExponentTooLarge so the diagnostic is honest.
+        use num_bigint::BigInt;
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        // 10^20 — exceeds i64::MAX, forces BigInt representation.
+        let huge: BigInt = BigInt::from(10u64).pow(20);
+        let exp = pool.integer(huge);
+        assert!(matches!(pool.get(exp), ExprNode::BigInt(_)));
+        let expr = pool.pow(x, exp);
+        match view_mut(&mut pool, expr, x) {
+            Err(ViewError::ExponentTooLarge) => {}
+            other => panic!("expected ExponentTooLarge, got {:?}", other),
+        }
     }
 }
 
