@@ -25,11 +25,20 @@ pub struct SolutionSet {
 
 /// Solve `eq` for `var`. `eq` may be an `Eq(lhs, rhs)` node or a bare
 /// expression treated as `expr = 0`.
+///
+/// `var` must be a `Symbol` ExprId. Passing anything else (a numeric
+/// literal, an `Add` node, etc.) returns `KernelError::NotASymbol` — the
+/// same contract `differentiate` enforces. Without this check, `view_mut`'s
+/// `expr == var` equality test would treat arbitrary nodes as the
+/// "variable" and produce nonsensical degrees/coefficients/solutions.
 pub fn solve(
     pool: &mut ExprPool,
     eq: ExprId,
     var: ExprId,
 ) -> Result<SolutionSet, KernelError> {
+    if !matches!(pool.get(var), ExprNode::Symbol(_)) {
+        return Err(KernelError::NotASymbol);
+    }
     let (lhs, rhs) = match pool.get(eq) {
         ExprNode::Eq(l, r) => (*l, *r),
         _ => {
@@ -276,6 +285,16 @@ pub fn solve_system(
         });
     }
 
+    // Every entry in `vars` must be a Symbol — `evaluate_numeric` keys
+    // bindings by ExprId, so passing a non-symbol (e.g. a literal `2`)
+    // would silently substitute every matching node in the equations
+    // with the assigned value and produce garbage coefficients.
+    for &v in vars {
+        if !matches!(pool.get(v), ExprNode::Symbol(_)) {
+            return Err(KernelError::NotASymbol);
+        }
+    }
+
     let zero_bindings: Vec<(ExprId, f64)> =
         vars.iter().map(|&v| (v, 0.0)).collect();
 
@@ -483,6 +502,57 @@ mod tests {
         let eq = pool.eq_node(x3, one);
         let result = solve(&mut pool, eq, x);
         assert!(matches!(result, Err(KernelError::UnsupportedEquation { .. })));
+    }
+
+    // ---- non-symbol `var` validation -------------------------------------
+
+    #[test]
+    fn solve_rejects_smallint_as_var() {
+        // Passing a literal `2` as the variable used to walk through
+        // `deg`/`view_mut` and produce a nonsensical "solution" mapping
+        // `SmallInt(2) → 0`. Must now return NotASymbol.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let three = pool.small_int(3);
+        let two = pool.small_int(2);
+        let three_x = pool.mul(vec![three, x]);
+        let eq = pool.eq_node(three_x, pool.zero);
+        let result = solve(&mut pool, eq, two);
+        assert!(matches!(result, Err(KernelError::NotASymbol)),
+                "expected NotASymbol for non-symbol var, got {:?}", result);
+    }
+
+    #[test]
+    fn solve_rejects_compound_expression_as_var() {
+        // Same contract, exercising a non-atom node — an Add. `view_mut`'s
+        // `expr == var` test could otherwise treat the Add as the
+        // "variable" wherever it appears in the equation.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let one = pool.one;
+        let x_plus_1 = pool.add(vec![x, one]);
+        let eq = pool.eq_node(x_plus_1, pool.zero);
+        // Caller misuses `x_plus_1` itself as the "variable" — nonsensical.
+        let result = solve(&mut pool, eq, x_plus_1);
+        assert!(matches!(result, Err(KernelError::NotASymbol)));
+    }
+
+    #[test]
+    fn solve_system_rejects_non_symbol_var() {
+        // Same hazard for the linear-system path. A literal in `vars`
+        // would silently match every occurrence of that literal in the
+        // equations during `evaluate_numeric` probing and produce
+        // garbage coefficients.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let two = pool.small_int(2); // literal, not a symbol
+        let eq1 = pool.eq_node(x, pool.zero);
+        let eq2 = pool.eq_node(y, pool.zero);
+        // vars = [x, 2] — second entry is a literal, must be rejected.
+        let result = solve_system(&mut pool, &[eq1, eq2], &[x, two]);
+        assert!(matches!(result, Err(KernelError::NotASymbol)),
+                "expected NotASymbol for non-symbol in vars, got {:?}", result);
     }
 
     #[test]
