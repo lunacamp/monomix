@@ -153,8 +153,15 @@ enum NumericVal {
 }
 
 /// Try to evaluate `id` to a numeric value if it's a closed-form numeric
-/// expression (atoms + Add/Mul/Neg/Pow over numerics). Returns None if
-/// any subterm is non-numeric or if values overflow i128 reasoning.
+/// expression: atoms (SmallInt / Rational / Float) plus
+/// `Add`/`Mul`/`Neg`/`Div`/`Pow` over numerics. `BigInt` atoms are not
+/// folded — they fall through to the `None` arm to keep the integer path
+/// inside `i128`.
+///
+/// `Pow` accepts integer exponents only (fractional/float exponents may
+/// produce irrational results that `NumericVal` cannot represent
+/// exactly). Returns `None` on any subterm that isn't numeric, on
+/// arithmetic overflow, or on division by zero.
 fn numeric_eval(pool: &ExprPool, id: ExprId) -> Option<NumericVal> {
     match pool.get(id) {
         ExprNode::SmallInt(n) => Some(NumericVal::Int(*n as i128)),
@@ -203,6 +210,22 @@ fn numeric_eval(pool: &ExprPool, id: ExprId) -> Option<NumericVal> {
                 }
             }
         }
+        ExprNode::Pow(base, exp) => {
+            // The doc above advertises numeric Pow folding; this arm
+            // implements it. Without it, coefficients like `0^n` or
+            // `(2-2)^3` would slip past `is_numerically_zero` and pollute
+            // `remove_zero_terms`, `deg`, and the polynomial solver paths.
+            let b = numeric_eval(pool, *base)?;
+            // Only integer exponents are folded — fractional/float
+            // exponents may produce irrational results (`sqrt`, `2^(1/3)`),
+            // which `NumericVal` cannot represent exactly.
+            let e = match numeric_eval(pool, *exp)? {
+                NumericVal::Int(n) => n,
+                NumericVal::Rat(p, q) if q == 1 => p,
+                _ => return None,
+            };
+            pow_numeric(b, e)
+        }
         _ => None,
     }
 }
@@ -248,6 +271,77 @@ fn mul_numeric(a: NumericVal, b: NumericVal) -> Option<NumericVal> {
             let q = aq.checked_mul(bq)?;
             Some(simplify_rat(p, q))
         }
+    }
+}
+
+/// Integer exponentiation over `NumericVal`. Returns `None` on overflow
+/// (Int / Rat paths use `checked_pow`) or when the base is zero with a
+/// negative exponent (division by zero).
+///
+/// `0^0` returns `Int(1)` — matching `i128::pow(0)`, `f64::powi(0)`, and the
+/// `num_traits::Pow` convention. Mathematically debatable, but the kernel
+/// only consumes the result via zero-detection / numeric eval where this
+/// convention is harmless.
+fn pow_numeric(base: NumericVal, exp: i128) -> Option<NumericVal> {
+    if exp == 0 {
+        return Some(NumericVal::Int(1));
+    }
+    if exp > 0 {
+        pow_nonneg(base, exp as u128)
+    } else {
+        // x^(-n) = 1 / x^n. Compute the positive power first, then invert.
+        let pos = pow_nonneg(base, exp.unsigned_abs())?;
+        reciprocal_numeric(pos)
+    }
+}
+
+fn pow_nonneg(base: NumericVal, exp: u128) -> Option<NumericVal> {
+    if exp == 0 {
+        return Some(NumericVal::Int(1));
+    }
+    match base {
+        NumericVal::Int(b) => {
+            // `i128::checked_pow` takes `u32`. Exponents above that are
+            // either (a) going to overflow `i128` (typical, e.g. 2^200) or
+            // (b) the base is in {-1, 0, 1} where the result is exactly
+            // representable. We bail conservatively for (a) and short-
+            // circuit (b) explicitly.
+            if b == 0 { return Some(NumericVal::Int(0)); }
+            if b == 1 { return Some(NumericVal::Int(1)); }
+            if b == -1 {
+                return Some(NumericVal::Int(if exp & 1 == 0 { 1 } else { -1 }));
+            }
+            let e32: u32 = exp.try_into().ok()?;
+            b.checked_pow(e32).map(NumericVal::Int)
+        }
+        NumericVal::Rat(p, q) => {
+            if p == 0 { return Some(NumericVal::Int(0)); }
+            let e32: u32 = exp.try_into().ok()?;
+            let pn = p.checked_pow(e32)?;
+            let qn = q.checked_pow(e32)?;
+            Some(simplify_rat(pn, qn))
+        }
+        NumericVal::Float(f) => {
+            // `f64::powi` takes `i32`; if the exponent doesn't fit, fall
+            // back to `powf`. Precision loss for very large exponents is
+            // acceptable — `f64` would be saturated anyway.
+            if exp <= i32::MAX as u128 {
+                Some(NumericVal::Float(f.powi(exp as i32)))
+            } else {
+                Some(NumericVal::Float(f.powf(exp as f64)))
+            }
+        }
+    }
+}
+
+fn reciprocal_numeric(v: NumericVal) -> Option<NumericVal> {
+    match v {
+        NumericVal::Int(0) => None,
+        NumericVal::Int(n) => Some(simplify_rat(1, n)),
+        NumericVal::Rat(p, _) if p == 0 => None,
+        NumericVal::Rat(p, q) => Some(simplify_rat(q, p)),
+        NumericVal::Float(f) if f == 0.0 => None,
+        NumericVal::Float(f) => Some(NumericVal::Float(1.0 / f)),
     }
 }
 
@@ -739,6 +833,153 @@ mod tests {
             Err(ViewError::ExponentTooLarge) => {}
             other => panic!("expected ExponentTooLarge, got {:?}", other),
         }
+    }
+
+    // ---- numeric_eval over Pow -------------------------------------------
+
+    #[test]
+    fn numeric_eval_pow_integer_base_and_exponent() {
+        let mut pool = ExprPool::new();
+        let two = pool.small_int(2);
+        let three = pool.small_int(3);
+        let p = pool.pow(two, three);
+        match numeric_eval(&pool, p) {
+            Some(NumericVal::Int(8)) => {}
+            other => panic!("expected Int(8), got {:?}", other),
+        }
+    }
+
+    // Note: there's no test for `0^0`. `pool.pow(_, 0)` short-circuits to
+    // `pool.one` ([expr/mod.rs:309](../expr/mod.rs)), so a `Pow(_, 0)` node
+    // is unreachable through the normal API. The `if exp == 0 { Int(1) }`
+    // guard inside `pow_numeric` is still kept as a defensive safety net
+    // for any future caller that builds Pow nodes via raw `intern`.
+
+    #[test]
+    fn numeric_eval_pow_zero_to_positive_is_zero() {
+        let mut pool = ExprPool::new();
+        let zero = pool.zero;
+        let five = pool.small_int(5);
+        let p = pool.pow(zero, five);
+        match numeric_eval(&pool, p) {
+            Some(NumericVal::Int(0)) => {}
+            other => panic!("expected Int(0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn numeric_eval_pow_negative_exponent_inverts() {
+        // 2^(-3) = 1/8
+        let mut pool = ExprPool::new();
+        let two = pool.small_int(2);
+        let neg_three = pool.small_int(-3);
+        let p = pool.pow(two, neg_three);
+        match numeric_eval(&pool, p) {
+            Some(NumericVal::Rat(1, 8)) => {}
+            other => panic!("expected Rat(1, 8), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn numeric_eval_pow_zero_to_negative_is_none() {
+        // 0^(-n) is division by zero; conservatively None.
+        let mut pool = ExprPool::new();
+        let zero = pool.zero;
+        let neg_one = pool.small_int(-1);
+        let p = pool.pow(zero, neg_one);
+        assert!(numeric_eval(&pool, p).is_none());
+    }
+
+    #[test]
+    fn numeric_eval_pow_overflow_returns_none() {
+        // 2^200 overflows i128. Must return None rather than wrapping.
+        let mut pool = ExprPool::new();
+        let two = pool.small_int(2);
+        let huge_exp = pool.small_int(200);
+        let p = pool.pow(two, huge_exp);
+        assert!(numeric_eval(&pool, p).is_none());
+    }
+
+    #[test]
+    fn numeric_eval_pow_neg_one_alternates() {
+        // (-1)^n: shortcut for the {-1, 0, 1} base optimization. Must
+        // return +1 for even, -1 for odd, regardless of how large the
+        // exponent is (the shortcut sidesteps the u32 cap).
+        let mut pool = ExprPool::new();
+        let neg_one = pool.small_int(-1);
+        let huge_even = pool.small_int(1_000_000);
+        let huge_odd = pool.small_int(1_000_001);
+        let p_even = pool.pow(neg_one, huge_even);
+        let p_odd = pool.pow(neg_one, huge_odd);
+        assert!(matches!(numeric_eval(&pool, p_even), Some(NumericVal::Int(1))));
+        assert!(matches!(numeric_eval(&pool, p_odd), Some(NumericVal::Int(-1))));
+    }
+
+    #[test]
+    fn numeric_eval_pow_rational_base() {
+        // (1/2)^3 = 1/8
+        use num_bigint::BigInt;
+        let mut pool = ExprPool::new();
+        let half = pool.rational(BigInt::from(1), BigInt::from(2));
+        let three = pool.small_int(3);
+        let p = pool.pow(half, three);
+        match numeric_eval(&pool, p) {
+            Some(NumericVal::Rat(1, 8)) => {}
+            other => panic!("expected Rat(1, 8), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn is_numerically_zero_detects_pow_zero_to_positive() {
+        // The exact case the reviewer flagged: a coefficient `0^n` (n>0)
+        // must be detected as zero so `remove_zero_terms` strips it.
+        let mut pool = ExprPool::new();
+        let zero = pool.zero;
+        let n = pool.small_int(5);
+        let p = pool.pow(zero, n);
+        assert!(is_numerically_zero(&pool, p),
+                "Pow(0, 5) must be recognized as numerically zero");
+    }
+
+    #[test]
+    fn is_numerically_zero_detects_pow_of_structural_zero() {
+        // `(2 - 2)^3 = 0`. The base is structurally `Add([2, Neg(2)])` —
+        // not literal zero — but evaluates to zero numerically, so the
+        // whole Pow must evaluate to zero.
+        let mut pool = ExprPool::new();
+        let two = pool.small_int(2);
+        let neg_two = pool.neg(two);
+        let base = pool.add(vec![two, neg_two]);
+        // Defensive: confirm the base isn't already the canonical pool.zero
+        // (so we actually exercise the recursive numeric_eval path).
+        // Note: pool.add may collapse `2 + (-2)` to pool.zero — if so this
+        // test trivially passes via the `is_zero` shortcut, which is still
+        // correct behavior.
+        let three = pool.small_int(3);
+        let p = pool.pow(base, three);
+        assert!(is_numerically_zero(&pool, p));
+    }
+
+    #[test]
+    fn remove_zero_terms_strips_pow_zero_coefficients() {
+        // End-to-end: a polynomial term whose coefficient is `Pow(0, n)`
+        // must be removed by `remove_zero_terms`. Pre-fix, the Pow node
+        // survived numeric_eval and the term polluted the polynomial.
+        let mut pool = ExprPool::new();
+        let one = pool.one;
+        let zero = pool.zero;
+        let three = pool.small_int(3);
+        let zero_pow = pool.pow(zero, three); // 0^3 — should be dropped
+        let mut poly = vec![
+            Term { exp: 2, coeff: one },
+            Term { exp: 1, coeff: zero_pow },
+            Term { exp: 0, coeff: one },
+        ];
+        remove_zero_terms(&pool, &mut poly);
+        // The `0^3` term must be gone; `1*x^2` and `1` remain.
+        assert_eq!(poly.len(), 2, "Pow(0,3) coefficient term should be stripped");
+        assert!(poly.iter().all(|t| t.exp != 1),
+                "the exp=1 term (with Pow(0,3) coefficient) must be removed");
     }
 }
 
