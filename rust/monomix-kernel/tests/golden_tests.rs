@@ -38,6 +38,18 @@ use monomix_kernel::poly::{deg, is_polynomial_in};
 use monomix_kernel::simplify::{simplify, SimplifierConfig, SimplifyCache};
 use serde::Deserialize;
 
+/// One golden-corpus row.
+///
+/// `ignore_reason` is documentation only — the runner just prints it next to
+/// the `SKIP:` line. Two categories of reason are acceptable; see
+/// `tests/golden/README.md` for the full convention:
+///
+/// 1. **Unimplemented feature** (free prose), e.g. "df() result display not
+///    yet implemented". Most current ignores. Flip to `ignore = false` when
+///    the feature lands.
+/// 2. **Intentional REDUCE divergence**, referencing a divergence id from
+///    `tests/golden/divergences.toml`, e.g. "symbol-ordering: REDUCE sorts
+///    alphabetically". Rare.
 #[derive(Debug, Deserialize)]
 struct Entry {
     input: String,

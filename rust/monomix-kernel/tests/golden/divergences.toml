@@ -1,5 +1,36 @@
-# Known intentional divergences between Monomix output and REDUCE output.
-# Every divergence must have an entry here before marking ignore=true in a manifest.
+# REDUCE↔Monomix intentional divergences.
+#
+# This file documents cases where Monomix is **fully implemented** but
+# intentionally differs from REDUCE's output (display formatting, term
+# ordering, etc.). These are not bugs — they're conscious deviations from
+# REDUCE's conventions, recorded here so future maintainers know not to
+# "fix" them.
+#
+# Scope: implementation-complete divergences only.
+# ---------------------------------------------------------------------
+# Golden-manifest entries marked `ignore = true` with reasons like
+# "X result display not yet implemented" or "X not yet in M1" represent
+# **unimplemented features**, not divergences from REDUCE. Those entries
+# document a TODO, not a divergence, and live in their own manifests with
+# free-form `ignore_reason` strings. They do not require an entry here.
+#
+# When a TODO becomes a divergence.
+# ---------------------------------------------------------------------
+# If a feature is implemented but its output deliberately differs from
+# REDUCE (e.g., Monomix sorts Add children by canonical ExprId rather
+# than REDUCE's lexicographic order), add a `[[divergences]]` entry here
+# and reference its `id` from the manifest entry's `ignore_reason`.
+#
+# Schema.
+# ---------------------------------------------------------------------
+# Each entry has `id` (kebab-case, stable) and `reason` (one-line
+# rationale). Today nothing automatically enforces consistency between
+# `ignore_reason` strings and these `id`s; the link is a documentation
+# convention. If/when a check is added, the convention is for a manifest
+# `ignore_reason` to either:
+#   (a) start with a divergence `id` from this file (e.g.
+#       "symbol-ordering: REDUCE expects alphabetical"), or
+#   (b) describe an unimplemented feature in plain prose.
 
 [[divergences]]
 id = "rational-display"
