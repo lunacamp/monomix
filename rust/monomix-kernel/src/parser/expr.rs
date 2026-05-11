@@ -175,23 +175,51 @@ impl<'s, 'p> ExprParser<'s, 'p> {
     }
 
     fn try_rational(&mut self, lhs: ExprId) -> Option<ExprId> {
+        use num_traits::Zero;
         if self.lexer.peek_at(0).0.kind() != TokenKind::Slash {
             return None;
         }
 
-        let p = match self.pool.get(lhs).clone() {
+        // Validate the denominator at slot 1 (without consuming). Must be an
+        // integer literal — SmallInt or BigInt — and not zero. Inspecting by
+        // reference avoids moving the Box<BigInt> out of the lexer buffer;
+        // the actual value is extracted after both tokens are consumed.
+        match self.lexer.peek_at(1).0.kind() {
+            TokenKind::SmallInt => {
+                if matches!(self.lexer.peek_at(1).0, Token::SmallInt(0)) {
+                    return None;
+                }
+            }
+            TokenKind::BigInt => {
+                // The lexer narrows numeric literals to SmallInt when they
+                // fit in i64, so `Token::BigInt(0)` is unreachable from
+                // valid source — but check defensively in case that ever
+                // changes (and to make the invariant local to this fn).
+                if let Token::BigInt(b) = &self.lexer.peek_at(1).0 {
+                    if b.is_zero() {
+                        return None;
+                    }
+                }
+            }
+            _ => return None,
+        }
+
+        // Numerator (LHS): SmallInt or BigInt only.
+        let p: num_bigint::BigInt = match self.pool.get(lhs).clone() {
             ExprNode::SmallInt(p) => num_bigint::BigInt::from(p),
+            ExprNode::BigInt(p) => *p,
             _ => return None,
         };
 
-        let q = match self.lexer.peek_at(1).0 {
-            Token::SmallInt(0) => return None,
+        // Commit: consume the '/' and the denominator, then extract.
+        self.lexer.next();
+        let (den_tok, _) = self.lexer.next();
+        let q: num_bigint::BigInt = match den_tok {
             Token::SmallInt(q) => num_bigint::BigInt::from(q),
-            _ => return None,
+            Token::BigInt(b) => *b,
+            _ => unreachable!("guarded by the kind/zero peek above"),
         };
 
-        self.lexer.next(); // consume '/'
-        self.lexer.next(); // consume denominator
         Some(self.pool.rational(p, q))
     }
 
@@ -437,5 +465,60 @@ mod tests {
             }
             other => panic!("expected Fn(Custom(...), ...), got {:?}", other),
         }
+    }
+
+    // ---- try_rational with BigInt operands -----------------------------
+
+    #[test]
+    fn parse_rational_with_bigint_numerator() {
+        // 10^20 / 3 — numerator exceeds i64::MAX, forces BigInt token.
+        // Before this fix, try_rational's SmallInt-only LHS arm returned
+        // None and parsing fell back to Div(BigInt, SmallInt).
+        let (pool, id) = parse_one("100000000000000000000/3");
+        match pool.get(id) {
+            crate::expr::ExprNode::Rational(b) => {
+                // gcd(10^20, 3) = 1, so the rational is already in lowest terms.
+                assert_eq!(b.0.to_string(), "100000000000000000000");
+                assert_eq!(b.1.to_string(), "3");
+            }
+            other => panic!("expected Rational(10^20, 3), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_rational_with_bigint_denominator() {
+        let (pool, id) = parse_one("1/100000000000000000000");
+        match pool.get(id) {
+            crate::expr::ExprNode::Rational(b) => {
+                assert_eq!(b.0.to_string(), "1");
+                assert_eq!(b.1.to_string(), "100000000000000000000");
+            }
+            other => panic!("expected Rational(1, 10^20), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_rational_with_bigint_both_sides() {
+        // 10^20 / (2 * 10^20) reduces to 1/2 after pool.rational's
+        // gcd normalization — confirming the BigInt path goes through
+        // canonicalization, not just `Div`.
+        let (pool, id) = parse_one("100000000000000000000/200000000000000000000");
+        match pool.get(id) {
+            crate::expr::ExprNode::Rational(b) => {
+                assert_eq!(b.0.to_string(), "1");
+                assert_eq!(b.1.to_string(), "2");
+            }
+            other => panic!("expected Rational(1, 2), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_rational_smallint_zero_denominator_falls_back_to_div() {
+        // 1/0 must still leave the parser intact and not panic. The
+        // earlier zero-denominator fix established this contract; this
+        // test pins it down so future try_rational rewrites don't regress.
+        let (pool, id) = parse_one("1/0");
+        // Falls back to the generic Pratt infix path → Div(1, 0).
+        assert!(matches!(pool.get(id), crate::expr::ExprNode::Div(_, _)));
     }
 }

@@ -181,22 +181,6 @@ fn solve_quadratic(
     })
 }
 
-fn try_to_f64(pool: &ExprPool, expr: ExprId) -> Option<f64> {
-    use num_traits::ToPrimitive;
-    match pool.get(expr) {
-        ExprNode::SmallInt(n) => Some(*n as f64),
-        ExprNode::BigInt(n) => n.to_f64(),
-        ExprNode::Rational(b) => {
-            let p = b.0.to_f64()?;
-            let q = b.1.to_f64()?;
-            Some(p / q)
-        }
-        ExprNode::Float(f) => Some(f.0),
-        ExprNode::Neg(inner) => try_to_f64(pool, *inner).map(|v| -v),
-        _ => None,
-    }
-}
-
 /// Sign of a discriminant: used by the quadratic solver to pick between the
 /// complex-roots / double-root / two-real-roots branches without going through
 /// `f64`.
