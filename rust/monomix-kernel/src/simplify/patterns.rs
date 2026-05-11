@@ -110,12 +110,36 @@ pub struct Rule {
     pub rhs: Box<dyn Fn(&mut ExprPool, &MatchEnv) -> ExprId + Send + Sync>,
 }
 
+/// A set of rewrite rules.
+///
+/// Each registry carries a unique `id` assigned at construction via a
+/// process-global monotonic counter. The id — not the registry's memory
+/// address — is what `SimplifyCache` uses to partition entries, so cached
+/// results computed under one registry can never leak into lookups for
+/// another, even if the previous registry was dropped and its address was
+/// reused by a fresh allocation.
 pub struct RuleRegistry {
     pub rules: Vec<Rule>,
+    id: u64,
 }
 
+/// Process-global counter for `RuleRegistry::id`. Monotonic — once issued,
+/// an id is never reused, so `Drop + realloc` cannot cause id collisions.
+static NEXT_REGISTRY_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
 impl RuleRegistry {
-    pub fn new() -> Self { RuleRegistry { rules: Vec::new() } }
+    pub fn new() -> Self {
+        let id = NEXT_REGISTRY_ID
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        RuleRegistry { rules: Vec::new(), id }
+    }
+
+    /// Stable, process-unique identity for this registry. Used as part of
+    /// the `SimplifyCache` key so cached results stay correctly partitioned
+    /// across distinct registries (including registries that happen to
+    /// share a stack/heap address after a previous one is dropped).
+    pub fn id(&self) -> u64 { self.id }
 
     pub fn add(&mut self, rule: Rule) { self.rules.push(rule); }
 
@@ -161,5 +185,41 @@ mod tests {
         // DEFAULT_RULES is a LazyLock<RuleRegistry>; deref and check.
         assert!(DEFAULT_RULES.rules.is_empty(),
                 "DEFAULT_RULES must be empty (no auto trig collapse)");
+    }
+
+    #[test]
+    fn rule_registry_ids_are_unique() {
+        // Each construction mints a fresh id from a monotonic counter.
+        let a = RuleRegistry::new();
+        let b = RuleRegistry::new();
+        let c = RuleRegistry::new();
+        assert_ne!(a.id(), b.id());
+        assert_ne!(b.id(), c.id());
+        assert_ne!(a.id(), c.id());
+    }
+
+    #[test]
+    fn rule_registry_id_survives_drop_and_reallocate() {
+        // Regression: keying a cache by pointer address is unsound because
+        // stack reuse can give two distinct registries the same `*const`.
+        // The monotonic-id scheme guarantees the second id strictly
+        // exceeds the first regardless of any address reuse.
+        let id1 = {
+            let r = RuleRegistry::new();
+            r.id()
+        };
+        // After `r` is dropped, the next allocation may land at the same
+        // address. The id must still differ.
+        let id2 = RuleRegistry::new().id();
+        assert!(id2 > id1, "ids must be monotonic ({} should be > {})", id2, id1);
+    }
+
+    #[test]
+    fn default_rules_id_is_stable_across_lookups() {
+        // The `LazyLock<RuleRegistry>` initializes once; subsequent derefs
+        // must return the same id (otherwise cache reuse would be lost).
+        let id_a = DEFAULT_RULES.id();
+        let id_b = DEFAULT_RULES.id();
+        assert_eq!(id_a, id_b);
     }
 }

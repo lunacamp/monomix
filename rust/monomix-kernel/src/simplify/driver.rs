@@ -26,21 +26,24 @@ impl Default for SimplifierConfig {
 /// under the rule registry that produced them: a result computed with
 /// `DEFAULT_RULES` (empty) is *not* equivalent to what the trig registry
 /// would have produced for the same input. To make this sound, entries are
-/// keyed by `(registry_addr, ExprId)` — the registry's address (as `usize`)
-/// is part of the key, so distinct registries see disjoint cache partitions
-/// and can never serve each other's stale results.
+/// keyed by `(registry_id, ExprId)` — every `RuleRegistry` carries a
+/// process-unique `u64` id assigned at construction (see
+/// `RuleRegistry::id`). Because ids are monotonic and never reused, distinct
+/// registries always see disjoint cache partitions — including registries
+/// that happen to share a stack/heap address after a previous one was
+/// dropped (which a pointer-based identity scheme would silently conflate).
 ///
-/// **Perf note.** Identity is by pointer (as `usize`), so registries with
-/// stable addresses (`DEFAULT_RULES` is a `LazyLock`) get persistent cache
-/// reuse across calls. `simplify_trig`, in contrast, currently builds a
-/// fresh `RuleRegistry` per call, so each call gets a fresh stack address
-/// and its own cache partition. That's correctness-safe (a stale entry can
-/// never be returned) but it does mean repeated `simplify_trig` calls don't
-/// benefit from cache reuse — callers who want that should hoist the
-/// registry construction and call `driver::simplify` directly.
+/// **Perf note.** Each `RuleRegistry::new()` call mints a fresh id. So a
+/// static `LazyLock<RuleRegistry>` (like `DEFAULT_RULES`) has one stable id
+/// for its whole lifetime and benefits from cache reuse across calls.
+/// `simplify_trig`, in contrast, currently builds a fresh registry per
+/// call — each gets its own id and its own cache partition. That's
+/// correctness-safe but means repeated `simplify_trig` calls don't share
+/// cache state; callers who want that should hoist the registry
+/// construction and call `driver::simplify` directly.
 #[derive(Default)]
 pub struct SimplifyCache {
-    map: FxHashMap<(usize, ExprId), ExprId>,
+    map: FxHashMap<(u64, ExprId), ExprId>,
 }
 
 impl SimplifyCache {
@@ -62,14 +65,12 @@ impl SimplifyCache {
 
     #[inline]
     fn lookup(&self, rules: &RuleRegistry, expr: ExprId) -> Option<ExprId> {
-        let addr = rules as *const RuleRegistry as usize;
-        self.map.get(&(addr, expr)).copied()
+        self.map.get(&(rules.id(), expr)).copied()
     }
 
     #[inline]
     fn store(&mut self, rules: &RuleRegistry, expr: ExprId, result: ExprId) {
-        let addr = rules as *const RuleRegistry as usize;
-        self.map.insert((addr, expr), result);
+        self.map.insert((rules.id(), expr), result);
     }
 }
 
