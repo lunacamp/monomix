@@ -96,7 +96,15 @@ pub fn fold_numeric(pool: &mut ExprPool, expr: ExprId) -> Option<ExprId> {
 
 fn negate_const(pool: &mut ExprPool, id: ExprId) -> Option<ExprId> {
     match pool.get(id).clone() {
-        ExprNode::SmallInt(n) => Some(pool.small_int(-n)),
+        ExprNode::SmallInt(n) => match n.checked_neg() {
+            // `-i64::MIN` overflows `i64` (`checked_neg` returns `None`).
+            // Promote through `BigInt` so `fold_numeric` stays panic-free
+            // in debug and avoids silent wrap in release. `pool.integer`
+            // canonicalises back to `SmallInt` when the result fits, so
+            // the only observable change is at the `i64::MIN` boundary.
+            Some(neg) => Some(pool.small_int(neg)),
+            None => Some(pool.integer(-BigInt::from(n))),
+        },
         ExprNode::BigInt(b) => Some(pool.integer(-(*b))),
         ExprNode::Rational(b) => Some(pool.rational(-b.0, b.1)),
         ExprNode::Float(f) => Some(pool.float(-f.0)),
@@ -220,6 +228,47 @@ mod tests {
             assert_eq!(b.1, BigInt::from(6));
         } else {
             panic!("expected Rational(1, 6), got {:?}", pool.get(result));
+        }
+    }
+
+    #[test]
+    fn fold_neg_of_i64_min_does_not_panic() {
+        // Regression: `negate_const` previously did `pool.small_int(-n)` for
+        // `SmallInt(i64::MIN)`. The negation overflows i64 — panics in debug,
+        // wraps to i64::MIN in release. Both are wrong: `fold_numeric` must
+        // be panic-free, and the wrapping result loses sign information.
+        // The fix promotes through BigInt; the canonicaliser in
+        // `pool.integer` re-narrows to SmallInt when the result fits, so
+        // only the `i64::MIN` boundary actually allocates a BigInt.
+        let mut pool = ExprPool::new();
+        let min = pool.small_int(i64::MIN);
+        let neg = pool.neg(min);
+        let result = fold_numeric(&mut pool, neg).unwrap();
+        // `-i64::MIN` is `i64::MAX + 1`, which doesn't fit in i64.
+        let expected_big = -BigInt::from(i64::MIN);
+        match pool.get(result) {
+            ExprNode::BigInt(b) => assert_eq!(&**b, &expected_big),
+            other => panic!("expected BigInt({}), got {:?}", expected_big, other),
+        }
+    }
+
+    #[test]
+    fn fold_neg_of_i64_min_inside_add() {
+        // Same as above but exercises the path through `fold_numeric`'s Add
+        // arm, since that's the realistic call site (parser lowers `a - b`
+        // to `Add([a, Neg(b)])`). Result is a Rational(p, 1) where p is the
+        // BigInt-promoted value; downstream consumers should see no panic.
+        let mut pool = ExprPool::new();
+        let min = pool.small_int(i64::MIN);
+        let one = pool.small_int(1);
+        let neg_min = pool.neg(min);
+        let sum = pool.add(vec![one, neg_min]);
+        let result = fold_numeric(&mut pool, sum).unwrap();
+        // 1 + (-i64::MIN) = 1 + (2^63) = 2^63 + 1
+        let expected = BigInt::from(1) + (-BigInt::from(i64::MIN));
+        match pool.get(result) {
+            ExprNode::BigInt(b) => assert_eq!(&**b, &expected),
+            other => panic!("expected BigInt({}), got {:?}", expected, other),
         }
     }
 
