@@ -78,19 +78,62 @@ pub fn fold_numeric(pool: &mut ExprPool, expr: ExprId) -> Option<ExprId> {
         }
         ExprNode::Pow(base, exp) => {
             match (pool.get(base).clone(), pool.get(exp).clone()) {
-                (ExprNode::SmallInt(b), ExprNode::SmallInt(e)) if e >= 0 => {
-                    let result = Pow::pow(BigInt::from(b), e as u32);
-                    Some(pool.integer(result))
-                }
-                (ExprNode::SmallInt(b), ExprNode::SmallInt(e)) if e < 0 => {
-                    // b^(-n) = 1/b^n
-                    let bn = Pow::pow(BigInt::from(b), (-e) as u32);
-                    Some(pool.rational(BigInt::one(), bn))
+                (ExprNode::SmallInt(b), ExprNode::SmallInt(e)) => {
+                    fold_smallint_pow(pool, b, e)
                 }
                 _ => None,
             }
         }
         _ => None,
+    }
+}
+
+/// Fold `b^e` where both are `SmallInt`. `fold_numeric` must be panic-free,
+/// so this routes around three pitfalls in the obvious `as u32` cast:
+///
+/// 1. **`i64::MIN` negation.** Computing `(-e) as u32` panics in debug and
+///    wraps in release when `e == i64::MIN`. `i64::unsigned_abs` is the
+///    panic-free `|e|` (yields `2^63: u64` at the boundary), and the
+///    subsequent `try_into::<u32>` rejects it cleanly.
+/// 2. **`as u32` truncation.** Even on the positive arm, `e as u32` silently
+///    loses bits for `e > u32::MAX`. With `|b| >= 2` the result would
+///    overflow any reasonable memory budget, so bailing is the right call —
+///    `try_into::<u32>` does it for us.
+/// 3. **`0^(-n)` division by zero.** `Pow::pow(0, n) == 0`, after which
+///    `pool.rational(1, 0)` asserts. The base-specific shortcut for `b == 0`
+///    short-circuits this — we return `None` rather than fold to an
+///    undefined value.
+///
+/// Returns `None` when `|e| > u32::MAX` (with `|b| >= 2`) or when
+/// `b == 0 && e < 0`. The `{-1, 0, 1}` shortcuts collapse the full `i64`
+/// exponent range without ever invoking `BigInt::pow`, so those bases
+/// always fold.
+fn fold_smallint_pow(pool: &mut ExprPool, b: i64, e: i64) -> Option<ExprId> {
+    // Base-specific shortcuts: these collapse the full i64 exponent range
+    // without touching `BigInt::pow`'s u32 limit.
+    if b == 0 {
+        return match e.cmp(&0) {
+            std::cmp::Ordering::Greater => Some(pool.small_int(0)),
+            std::cmp::Ordering::Equal => Some(pool.small_int(1)), // 0^0 = 1 convention
+            std::cmp::Ordering::Less => None, // 0^negative is undefined; don't fold
+        };
+    }
+    if b == 1 { return Some(pool.small_int(1)); }
+    if b == -1 {
+        // (-1)^e: 1 if e is even, -1 if odd. `i64::MIN % 2 == 0` so this
+        // is well-defined across the full i64 range.
+        return Some(pool.small_int(if e % 2 == 0 { 1 } else { -1 }));
+    }
+
+    // |b| >= 2: bail if |e| can't fit in `u32` (BigInt::pow's argument type).
+    // `unsigned_abs` is the panic-free `|e|`; the `try_into` is the actual
+    // safety check.
+    let exp_u32: u32 = e.unsigned_abs().try_into().ok()?;
+    let pow = Pow::pow(BigInt::from(b), exp_u32);
+    if e >= 0 {
+        Some(pool.integer(pow))
+    } else {
+        Some(pool.rational(BigInt::one(), pow))
     }
 }
 
@@ -228,6 +271,108 @@ mod tests {
             assert_eq!(b.1, BigInt::from(6));
         } else {
             panic!("expected Rational(1, 6), got {:?}", pool.get(result));
+        }
+    }
+
+    #[test]
+    fn fold_pow_i64_min_exponent_with_huge_base_bails() {
+        // Regression: previously `(-e) as u32` with `e == i64::MIN` either
+        // panicked (debug) or wrapped to 0 (release), making `b^i64::MIN`
+        // fold to `1/1 = 1` for any `b` — wildly wrong. `|b| >= 2` with
+        // `|e| > u32::MAX` must return `None` so the caller falls through.
+        let mut pool = ExprPool::new();
+        let two = pool.small_int(2);
+        let min = pool.small_int(i64::MIN);
+        let expr = pool.pow(two, min);
+        let result = fold_numeric(&mut pool, expr);
+        assert!(result.is_none(), "2^i64::MIN must bail, not fold (got {:?})",
+                result.map(|id| pool.get(id).clone()));
+    }
+
+    #[test]
+    fn fold_pow_huge_positive_exponent_bails() {
+        // Symmetric to the i64::MIN case: `e > u32::MAX` would previously
+        // silently truncate via `e as u32`, producing a wrong result. With
+        // |b| >= 2 we now bail.
+        let mut pool = ExprPool::new();
+        let three = pool.small_int(3);
+        let huge = pool.small_int(u32::MAX as i64 + 1);
+        let expr = pool.pow(three, huge);
+        let result = fold_numeric(&mut pool, expr);
+        assert!(result.is_none(),
+                "3^(u32::MAX+1) must bail (would truncate to 3^0=1 under \
+                 the old `as u32` cast); got {:?}",
+                result.map(|id| pool.get(id).clone()));
+    }
+
+    #[test]
+    fn fold_pow_minus_one_to_i64_min_is_one() {
+        // (-1)^e is exactly representable for any i64 exponent. `i64::MIN`
+        // is even, so the result is 1 — must fold, not bail.
+        let mut pool = ExprPool::new();
+        let neg_one = pool.small_int(-1);
+        let min = pool.small_int(i64::MIN);
+        let expr = pool.pow(neg_one, min);
+        let result = fold_numeric(&mut pool, expr).unwrap();
+        assert_eq!(pool.get(result), &ExprNode::SmallInt(1));
+    }
+
+    #[test]
+    fn fold_pow_minus_one_to_huge_odd_is_minus_one() {
+        // (-1)^(odd) = -1 across the full i64 range; `i64::MAX` is odd.
+        let mut pool = ExprPool::new();
+        let neg_one = pool.small_int(-1);
+        let max = pool.small_int(i64::MAX);
+        let expr = pool.pow(neg_one, max);
+        let result = fold_numeric(&mut pool, expr).unwrap();
+        assert_eq!(pool.get(result), &ExprNode::SmallInt(-1));
+    }
+
+    #[test]
+    fn fold_pow_one_to_i64_min_is_one() {
+        // 1^anything = 1 — must fold regardless of how pathological the
+        // exponent is.
+        let mut pool = ExprPool::new();
+        let one = pool.small_int(1);
+        let min = pool.small_int(i64::MIN);
+        let expr = pool.pow(one, min);
+        let result = fold_numeric(&mut pool, expr).unwrap();
+        assert_eq!(pool.get(result), &ExprNode::SmallInt(1));
+    }
+
+    #[test]
+    fn fold_pow_zero_to_negative_does_not_panic() {
+        // Pre-fix: `Pow::pow(0, n) == 0`, then `pool.rational(1, 0)`
+        // panicked with "rational: denominator is zero". Must now return
+        // `None` (0^negative is mathematically undefined, not foldable).
+        //
+        // Note: `pool.pow(zero, neg)` does *not* short-circuit (only
+        // `pool.pow(_, 0)` and `pool.pow(_, 1)` do), so this path is
+        // reachable through normal construction.
+        let mut pool = ExprPool::new();
+        let zero = pool.small_int(0);
+        let neg_three = pool.small_int(-3);
+        let expr = pool.pow(zero, neg_three);
+        let result = fold_numeric(&mut pool, expr);
+        assert!(result.is_none(), "0^(-3) must not fold (got {:?})",
+                result.map(|id| pool.get(id).clone()));
+    }
+
+    #[test]
+    fn fold_pow_negative_exponent_still_folds_normally() {
+        // Make sure the rewrite didn't break the existing happy path:
+        // `2^(-3) = 1/8`.
+        let mut pool = ExprPool::new();
+        let two = pool.small_int(2);
+        let neg_three = pool.small_int(-3);
+        let expr = pool.pow(two, neg_three);
+        let result = fold_numeric(&mut pool, expr).unwrap();
+        use num_bigint::BigInt;
+        if let ExprNode::Rational(b) = pool.get(result) {
+            assert_eq!(b.0, BigInt::from(1));
+            assert_eq!(b.1, BigInt::from(8));
+        } else {
+            panic!("expected Rational(1, 8), got {:?}", pool.get(result));
         }
     }
 
