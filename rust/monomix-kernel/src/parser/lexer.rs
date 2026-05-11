@@ -91,11 +91,16 @@ impl<'s> Lexer<'s> {
     /// Look at slot `offset` (0 or 1), filling intermediate slots as needed.
     ///
     /// **Precondition:** `offset <= 1`. The lookahead buffer has only two
-    /// slots; `peek_at(2)` would panic inside `ArrayVec::push`. The only
-    /// caller in this kernel is the assignment-detection check in the
-    /// statement parser, which uses `offset == 1`.
-    pub fn peek_at(&mut self, offset: usize) -> &(Token, Span) {
-        debug_assert!(offset <= 1, "Lexer lookahead is 2 slots; offset must be 0 or 1");
+    /// slots; an out-of-range offset would panic deep inside `ArrayVec::push`
+    /// with an opaque message. We enforce the contract with an `assert!`
+    /// (not `debug_assert!`) so release builds get the same clear failure
+    /// mode as debug, and we expose the function as `pub(crate)` so an
+    /// external user of the lexer can't reach the foot-gun at all. The
+    /// only callers in this kernel are the assignment-detection check in
+    /// the statement parser and a couple of two-token disambiguations in
+    /// the expression parser, all using `offset == 1`.
+    pub(crate) fn peek_at(&mut self, offset: usize) -> &(Token, Span) {
+        assert!(offset <= 1, "Lexer lookahead is 2 slots; offset must be 0 or 1, got {offset}");
         while self.buffer.len() <= offset {
             let tok = self.scan_next();
             self.buffer.push(tok);
@@ -449,5 +454,28 @@ mod tests {
         assert_eq!(lexer.next().0.kind(), TokenKind::Invalid);
         assert_eq!(lexer.next().0.kind(), TokenKind::Plus);
         assert_eq!(lexer.next().0.kind(), TokenKind::SmallInt);
+    }
+
+    #[test]
+    fn peek_at_within_two_slot_window_works() {
+        // Happy path: offset 0 and 1 are both valid and stable across
+        // repeat calls (the buffer is pre-populated lazily).
+        let mut lexer = Lexer::new("1 + 2");
+        assert_eq!(lexer.peek_at(0).0.kind(), TokenKind::SmallInt);
+        assert_eq!(lexer.peek_at(1).0.kind(), TokenKind::Plus);
+        // Repeating must be idempotent — must not over-fill the ArrayVec.
+        assert_eq!(lexer.peek_at(0).0.kind(), TokenKind::SmallInt);
+        assert_eq!(lexer.peek_at(1).0.kind(), TokenKind::Plus);
+    }
+
+    #[test]
+    #[should_panic(expected = "Lexer lookahead is 2 slots")]
+    fn peek_at_out_of_range_panics_with_clear_message() {
+        // Regression: previously guarded only by `debug_assert!`, so
+        // release builds would panic deep inside `ArrayVec::push` with
+        // an opaque message ("vector overflow"). The upgraded `assert!`
+        // surfaces the precondition violation cleanly in any build mode.
+        let mut lexer = Lexer::new("1 + 2");
+        let _ = lexer.peek_at(2);
     }
 }
