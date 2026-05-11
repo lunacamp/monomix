@@ -126,11 +126,16 @@ fn solve_quadratic(
     let discriminant = pool.add(vec![b2, neg_four_ac]);
     let disc_simplified = simplify(pool, discriminant, &config, &mut cache);
 
-    if let Some(disc_val) = try_to_f64(pool, disc_simplified) {
-        if disc_val < 0.0 {
+    // Classify the discriminant exactly when possible. Going through `f64`
+    // misclassifies tiny rationals (underflow → false `Zero`) and huge
+    // BigInts/Rationals (overflow → NaN/Inf comparison surprises). Falls back
+    // to `f64` only for `Float` — for which we have no exact representation
+    // and the user has opted into floating-point semantics.
+    match classify_discriminant(pool, disc_simplified) {
+        Some(DiscSign::Negative) => {
             return Ok(SolutionSet { solutions: vec![], has_complex_roots: true });
         }
-        if disc_val == 0.0 {
+        Some(DiscSign::Zero) => {
             // Double root: x = -b / (2a). Returned once — `SolutionSet`
             // does not encode multiplicity, matching the convention used
             // by Mathematica's `Solve` and SymPy's `solve`. Callers that
@@ -145,6 +150,12 @@ fn solve_quadratic(
                 solutions: vec![vec![(var, s)]],
                 has_complex_roots: false,
             });
+        }
+        Some(DiscSign::Positive) | None => {
+            // Positive → fall through to the two-roots path below.
+            // None → discriminant is symbolic (not a numeric atom); we can't
+            // decide the sign at this point. Fall through to the symbolic
+            // two-roots path with `sqrt(disc)` left unevaluated.
         }
     }
 
@@ -182,6 +193,67 @@ fn try_to_f64(pool: &ExprPool, expr: ExprId) -> Option<f64> {
         }
         ExprNode::Float(f) => Some(f.0),
         ExprNode::Neg(inner) => try_to_f64(pool, *inner).map(|v| -v),
+        _ => None,
+    }
+}
+
+/// Sign of a discriminant: used by the quadratic solver to pick between the
+/// complex-roots / double-root / two-real-roots branches without going through
+/// `f64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscSign {
+    Negative,
+    Zero,
+    Positive,
+}
+
+/// Classify the sign of `expr` exactly when it's a numeric atom (or a `Neg`
+/// of one); fall back to `f64` only for `Float`, which has no exact form to
+/// inspect. Returns `None` when the expression is symbolic — callers must
+/// handle that case (typically by emitting a symbolic `sqrt(disc)`).
+///
+/// The pool's `rational` constructor normalizes denominators to be positive
+/// and rejects zero numerators (a zero rational becomes the pre-interned
+/// `SmallInt(0)`), so a live `Rational` node is always nonzero and its sign
+/// is exactly its numerator's sign.
+fn classify_discriminant(pool: &ExprPool, expr: ExprId) -> Option<DiscSign> {
+    use num_bigint::Sign;
+    match pool.get(expr) {
+        ExprNode::SmallInt(n) => Some(match n.cmp(&0) {
+            std::cmp::Ordering::Less => DiscSign::Negative,
+            std::cmp::Ordering::Equal => DiscSign::Zero,
+            std::cmp::Ordering::Greater => DiscSign::Positive,
+        }),
+        ExprNode::BigInt(b) => Some(match b.sign() {
+            Sign::Minus => DiscSign::Negative,
+            Sign::NoSign => DiscSign::Zero,
+            Sign::Plus => DiscSign::Positive,
+        }),
+        ExprNode::Rational(b) => Some(match b.0.sign() {
+            Sign::Minus => DiscSign::Negative,
+            // The pool normalizes zero rationals to `SmallInt(0)`, so this
+            // arm is defensive and should never fire under normal use.
+            Sign::NoSign => DiscSign::Zero,
+            Sign::Plus => DiscSign::Positive,
+        }),
+        ExprNode::Neg(inner) => classify_discriminant(pool, *inner).map(|s| match s {
+            DiscSign::Negative => DiscSign::Positive,
+            DiscSign::Zero => DiscSign::Zero,
+            DiscSign::Positive => DiscSign::Negative,
+        }),
+        ExprNode::Float(f) => {
+            let v = f.0;
+            if v.is_nan() {
+                None
+            } else if v < 0.0 {
+                Some(DiscSign::Negative)
+            } else if v > 0.0 {
+                Some(DiscSign::Positive)
+            } else {
+                // covers +0.0 and -0.0
+                Some(DiscSign::Zero)
+            }
+        }
         _ => None,
     }
 }
@@ -586,6 +658,91 @@ mod tests {
             }
             other => panic!("expected UnsupportedEquation(nonlinear), got {:?}", other),
         }
+    }
+
+    // ---- classify_discriminant ------------------------------------------
+
+    #[test]
+    fn classify_discriminant_smallint_signs() {
+        let mut pool = ExprPool::new();
+        let pos = pool.small_int(7);
+        let neg = pool.small_int(-3);
+        let zero = pool.zero;
+        assert_eq!(classify_discriminant(&pool, pos), Some(DiscSign::Positive));
+        assert_eq!(classify_discriminant(&pool, neg), Some(DiscSign::Negative));
+        assert_eq!(classify_discriminant(&pool, zero), Some(DiscSign::Zero));
+    }
+
+    #[test]
+    fn classify_discriminant_huge_bigint_does_not_overflow() {
+        // BigInt that exceeds f64::MAX (~1.8e308). `try_to_f64` would return
+        // +inf and the old `< 0.0` / `== 0.0` checks would both be false —
+        // a false-negative for the `Negative` case below would have caused
+        // misclassification through that path. With exact arithmetic, the
+        // sign is read directly from the BigInt.
+        use num_bigint::BigInt;
+        let mut pool = ExprPool::new();
+        let huge_pos: BigInt = BigInt::from(10).pow(400);
+        let huge_neg = -huge_pos.clone();
+        let pos_id = pool.integer(huge_pos);
+        let neg_id = pool.integer(huge_neg);
+        assert_eq!(classify_discriminant(&pool, pos_id), Some(DiscSign::Positive));
+        assert_eq!(classify_discriminant(&pool, neg_id), Some(DiscSign::Negative));
+    }
+
+    #[test]
+    fn classify_discriminant_tiny_rational_is_not_zero() {
+        // Rational 1/10^400 — under f64 this evaluates to 0.0 (underflow).
+        // The old code would have hit `disc_val == 0.0` and wrongly fired
+        // the double-root path. Exact classification reads the numerator
+        // sign and returns `Positive`.
+        use num_bigint::BigInt;
+        let mut pool = ExprPool::new();
+        let tiny_pos = pool.rational(BigInt::from(1), BigInt::from(10).pow(400));
+        let tiny_neg = pool.rational(BigInt::from(-1), BigInt::from(10).pow(400));
+        assert_eq!(classify_discriminant(&pool, tiny_pos), Some(DiscSign::Positive));
+        assert_eq!(classify_discriminant(&pool, tiny_neg), Some(DiscSign::Negative));
+    }
+
+    #[test]
+    fn classify_discriminant_neg_wrapper_flips_sign() {
+        let mut pool = ExprPool::new();
+        let five = pool.small_int(5);
+        let neg_five = pool.neg(five);
+        assert_eq!(classify_discriminant(&pool, neg_five), Some(DiscSign::Negative));
+        // Neg(Neg(x)) is collapsed by `pool.neg` to `x`, so we test against a
+        // hand-built Neg-of-rational chain too.
+        use num_bigint::BigInt;
+        let r = pool.rational(BigInt::from(3), BigInt::from(7));
+        let neg_r = pool.neg(r);
+        assert_eq!(classify_discriminant(&pool, neg_r), Some(DiscSign::Negative));
+    }
+
+    #[test]
+    fn classify_discriminant_float_uses_f64() {
+        let mut pool = ExprPool::new();
+        let pos = pool.float(1.5);
+        let neg = pool.float(-2.0);
+        let zero_pos = pool.float(0.0);
+        let zero_neg = pool.float(-0.0);
+        assert_eq!(classify_discriminant(&pool, pos), Some(DiscSign::Positive));
+        assert_eq!(classify_discriminant(&pool, neg), Some(DiscSign::Negative));
+        assert_eq!(classify_discriminant(&pool, zero_pos), Some(DiscSign::Zero));
+        // -0.0 must classify as Zero (not Negative) — both IEEE-754 zeros
+        // mean the discriminant is zero in finite-precision arithmetic.
+        assert_eq!(classify_discriminant(&pool, zero_neg), Some(DiscSign::Zero));
+    }
+
+    #[test]
+    fn classify_discriminant_returns_none_for_symbolic() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let two = pool.small_int(2);
+        let sym = pool.add(vec![x, two]);
+        // Symbolic discriminants are passed through to the two-roots path
+        // where a symbolic `sqrt(disc)` is emitted; we must not pretend
+        // to know the sign.
+        assert_eq!(classify_discriminant(&pool, sym), None);
     }
 
     #[test]
