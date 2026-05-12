@@ -123,6 +123,17 @@ fn solve_quadratic(
     let b = simplify(pool, b_raw, &config, &mut cache);
     let c = simplify(pool, c_raw, &config, &mut cache);
 
+    // Guard `a == 0`: `deg(poly_expr)` reported 2, but its leading coefficient
+    // can still simplify to zero (e.g., a symbolic `a*x^2 + b*x + c` with a
+    // bound to 0 by a prior substitution). Dividing by `2*a == 0` below would
+    // bake a `Div(_, 0)` tree into the returned roots, detonating at
+    // `evaluate_numeric` time far from the call site. Fall through to the
+    // linear solver on `b*x + c` instead — `solve_linear` already enforces
+    // the `b == 0` guard for that path.
+    if pool.is_zero(a) {
+        return solve_linear(pool, poly_expr, var);
+    }
+
     // discriminant = b^2 - 4*a*c
     // Short-circuit b^2 when b is zero: the simplifier would fold `0^2`
     // to `0` anyway (see `fold_smallint_pow`), but skipping the Pow node
@@ -704,6 +715,33 @@ mod tests {
         let result = solve(&mut pool, eq, x).unwrap();
         assert!(result.has_complex_roots);
         assert!(result.solutions.is_empty());
+    }
+
+    #[test]
+    fn solve_quadratic_with_zero_leading_coefficient_falls_back_to_linear() {
+        // `0*x^2 + 5*x + 3 = 0` simplifies to a linear equation `5*x + 3 = 0`
+        // with root x = -3/5. Without the `a == 0` guard, the quadratic
+        // formula constructs `Div(_, Mul([2, 0]))` and the caller gets a
+        // tree that detonates inside `evaluate_numeric` far from here.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let zero = pool.zero;
+        let three = pool.small_int(3);
+        let five = pool.small_int(5);
+        let two_int = pool.small_int(2);
+        let x2 = pool.pow(x, two_int);
+        let zero_x2 = pool.mul(vec![zero, x2]); // 0*x^2 — leading is 0
+        let five_x = pool.mul(vec![five, x]);
+        let poly = pool.add(vec![zero_x2, five_x, three]);
+        let result = solve(&mut pool, poly, x).unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        // Verify the returned root satisfies the original equation: 5*(-3/5) + 3 = 0.
+        let val = crate::evalnum::evaluate_numeric(
+            &pool,
+            &[],
+            result.solutions[0][0].1,
+        ).expect("root must be numerically evaluable");
+        assert!((val - (-0.6)).abs() < 1e-9, "expected -3/5, got {}", val);
     }
 
     #[test]
