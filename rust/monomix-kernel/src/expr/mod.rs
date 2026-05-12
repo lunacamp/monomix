@@ -116,6 +116,22 @@ impl ExprPool {
     // --- String interning ---------------------------------------------------
 
     fn intern_str(&mut self, s: &str) -> InternedStr {
+        // Fast path: ASCII-lowercase input needs no transformation, so we can
+        // look up by borrowed slice and skip the `to_lowercase()` String
+        // allocation entirely on cache hits. Only cache misses allocate (and
+        // they must — `IndexSet` stores owned keys). The parser passes raw
+        // identifier source text, which is almost always ASCII-lowercase on
+        // the hot path (100-term-poly bench, golden corpus).
+        if s.is_ascii() && !s.bytes().any(|b| b.is_ascii_uppercase()) {
+            if let Some(idx) = self.strings.get_index_of(s) {
+                return InternedStr(idx as u32);
+            }
+            let (idx, _) = self.strings.insert_full(s.to_string());
+            return InternedStr(idx as u32);
+        }
+        // Slow path: uppercase or non-ASCII input — lowercase once, then
+        // intern. Unicode case folding is needed here because identifier
+        // case-insensitivity must apply across the full Unicode range.
         let lower: String = s.to_lowercase();
         let (idx, _) = self.strings.insert_full(lower);
         InternedStr(idx as u32)

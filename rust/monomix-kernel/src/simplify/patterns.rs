@@ -145,9 +145,39 @@ impl RuleRegistry {
 
     pub fn apply(&self, pool: &mut ExprPool, expr: ExprId) -> Option<ExprId> {
         for rule in &self.rules {
+            // 1. Exact-shape match: the LHS pattern's structure (including
+            //    arity for Add/Mul) matches `expr`'s exactly.
             let mut env = MatchEnv::default();
             if rule.lhs.matches(pool, expr, &mut env) {
                 return Some((rule.rhs)(pool, &env));
+            }
+
+            // 2. Subset match for Add patterns: when the rule's LHS is an Add
+            //    of `k` patterns and `expr` is an Add of more than `k`
+            //    children, try matching the patterns against any subset of
+            //    children. On success, build `Add(unmatched_siblings ++ rhs)`.
+            //    Without this, `sin(x)^2 + cos(x)^2 + y` never triggers the
+            //    Pythagorean rule — almost every real-world trig sum has
+            //    extra summands.
+            if let Pattern::Add(pats) = &rule.lhs {
+                if let ExprNode::Add(children) = pool.get(expr).clone() {
+                    let kids: Vec<ExprId> = children.to_vec();
+                    if pats.len() < kids.len() && !pats.is_empty() {
+                        let mut env = MatchEnv::default();
+                        let mut used = vec![false; kids.len()];
+                        if try_permute(pool, pats, &kids, &mut used, &mut env) {
+                            let replacement = (rule.rhs)(pool, &env);
+                            let mut new_children: Vec<ExprId> = kids
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| !used[*i])
+                                .map(|(_, &c)| c)
+                                .collect();
+                            new_children.push(replacement);
+                            return Some(pool.add(new_children));
+                        }
+                    }
+                }
             }
         }
         None
