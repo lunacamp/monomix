@@ -122,7 +122,9 @@ fn solve_quadratic(
     let c = simplify(pool, c_raw, &config, &mut cache);
 
     // discriminant = b^2 - 4*a*c
-    // Short-circuit b^2 when b is zero (simplifier does not fold 0^n).
+    // Short-circuit b^2 when b is zero: the simplifier would fold `0^2`
+    // to `0` anyway (see `fold_smallint_pow`), but skipping the Pow node
+    // and its exponent literal avoids the round-trip through the pool.
     let b2 = if pool.is_zero(b) {
         pool.zero
     } else {
