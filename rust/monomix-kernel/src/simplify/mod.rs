@@ -150,6 +150,47 @@ mod tests {
             pool.get(r2)
         );
     }
+
+    #[test]
+    fn simplify_trig_subset_match_collapses_pythagorean_pair_in_larger_sum() {
+        // Regression: the Pythagorean LHS pattern is `Add([sin(u)^2, cos(u)^2])`
+        // with two children, but real-world trig sums almost always have more
+        // than two summands. Before the subset-match fix, `sin(x)^2 + cos(x)^2 + y`
+        // never rewrote — the size check `pats.len() == children.len()`
+        // bailed. After the fix, the rule fires on the matched pair and
+        // returns `Add([y, 1])`, which the rest of the simplifier finalizes.
+        use crate::expr::FnTag;
+
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let two = pool.small_int(2);
+        let sin_x = pool.func(FnTag::Sin, vec![x]);
+        let cos_x = pool.func(FnTag::Cos, vec![x]);
+        let sin_sq = pool.pow(sin_x, two);
+        let cos_sq = pool.pow(cos_x, two);
+        let expr = pool.add(vec![sin_sq, cos_sq, y]);
+
+        let cfg = SimplifierConfig::default();
+        let mut cache = SimplifyCache::new();
+        let result = simplify_trig(&mut pool, expr, &cfg, &mut cache);
+
+        // Sanity: result should evaluate to y + 1. Verify at x = 0.5, y = 2.
+        let v = crate::evalnum::evaluate_numeric(&pool, &[(x, 0.5), (y, 2.0)], result)
+            .expect("trig simplification result must be numerically evaluable");
+        assert!((v - 3.0).abs() < 1e-9, "expected y + 1 = 3 at y=2, got {}", v);
+
+        // And: sin/cos must be gone from the result tree — the rewrite
+        // actually fired rather than being silently skipped.
+        let has_trig = pool.fold(result, false, &mut |found, _id, node| {
+            found || matches!(node, ExprNode::Fn(FnTag::Sin, _) | ExprNode::Fn(FnTag::Cos, _))
+        });
+        assert!(
+            !has_trig,
+            "sin/cos should have been replaced by 1; got {:?}",
+            pool.get(result)
+        );
+    }
 }
 
 #[cfg(test)]
