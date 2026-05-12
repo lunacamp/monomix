@@ -213,14 +213,21 @@ impl<'s, 'p> ExprParser<'s, 'p> {
 
         // Commit: consume the '/' and the denominator, then extract.
         self.lexer.next();
-        let (den_tok, _) = self.lexer.next();
+        let (den_tok, den_span) = self.lexer.next();
         let q: num_bigint::BigInt = match den_tok {
             Token::SmallInt(q) => num_bigint::BigInt::from(q),
             Token::BigInt(b) => *b,
             _ => unreachable!("guarded by the kind/zero peek above"),
         };
 
-        Some(self.pool.rational(p, q))
+        let id = self.pool.rational(p, q);
+        // Mirror the other numeric-literal arms: record a span covering the
+        // whole literal (numerator start through denominator end) so later
+        // diagnostics can point at the full rational.
+        if let Some(num_span) = self.span_map.get(&lhs).copied() {
+            self.span_map.insert(id, Span { start: num_span.start, end: den_span.end });
+        }
+        Some(id)
     }
 
     fn build_infix(&mut self, op: Token, lhs: ExprId, rhs: ExprId) -> ExprId {
