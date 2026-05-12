@@ -167,8 +167,9 @@ fn numeric_eval(pool: &ExprPool, id: ExprId) -> Option<NumericVal> {
         ExprNode::SmallInt(n) => Some(NumericVal::Int(*n as i128)),
         ExprNode::BigInt(_) => None, // out-of-range: skip
         ExprNode::Rational(b) => {
-            let p = b.0.to_string().parse::<i128>().ok()?;
-            let q = b.1.to_string().parse::<i128>().ok()?;
+            use num_traits::ToPrimitive;
+            let p = b.0.to_i128()?;
+            let q = b.1.to_i128()?;
             Some(NumericVal::Rat(p, q))
         }
         ExprNode::Float(f) => Some(NumericVal::Float(f.0)),
