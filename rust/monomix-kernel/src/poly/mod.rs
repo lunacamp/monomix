@@ -1,4 +1,5 @@
 use crate::expr::{ExprId, ExprNode, ExprPool};
+use crate::simplify::numeric::fold_numeric;
 
 #[derive(Clone, Debug)]
 pub struct Term {
@@ -504,6 +505,14 @@ pub enum DivError {
 }
 
 /// Euclidean polynomial division: f = q*g + r, deg(r) < deg(g).
+///
+/// New quotient and remainder coefficients are passed through
+/// `fold_numeric` so that purely-numeric arithmetic (Div, Add, Mul, Neg
+/// trees produced by the in-loop pool operations) collapses to canonical
+/// atoms before any downstream check. Without this, `remove_zero_terms`
+/// and `simplify_div`'s exact-cancellation predicate would miss legal
+/// cancellations whose structural form is non-trivial — leaving messy
+/// nested `Div` nodes in the output.
 pub fn poly_div(pool: &mut ExprPool, f: &UnivPoly, g: &UnivPoly) -> Result<(UnivPoly, UnivPoly), DivError> {
     if g.is_empty() || (g.len() == 1 && pool.is_zero(g[0].coeff)) {
         return Err(DivError::DivisionByZero);
@@ -516,11 +525,21 @@ pub fn poly_div(pool: &mut ExprPool, f: &UnivPoly, g: &UnivPoly) -> Result<(Univ
     while !remainder.is_empty() && remainder[0].exp >= g_lead_exp {
         let r_lead = remainder[0].clone();
         let exp = r_lead.exp - g_lead_exp;
-        let coeff = pool.div(r_lead.coeff, g_lead_coeff);
+        let div = pool.div(r_lead.coeff, g_lead_coeff);
+        let coeff = fold_numeric(pool, div).unwrap_or(div);
         quotient.push(Term { exp, coeff });
         let factor = vec![Term { exp, coeff }];
         let sub = poly_mul(pool, &factor, g);
         remainder = poly_sub(pool, &remainder, &sub);
+        // Fold each remainder coefficient: poly_sub built `Add([a, Neg(b)])`
+        // chains over the in-loop pool ops, which `is_numerically_zero`
+        // catches only for closed-form numeric subsets. Folding now keeps
+        // the rest of the loop (and the final `remove_zero_terms`) honest.
+        for t in remainder.iter_mut() {
+            if let Some(folded) = fold_numeric(pool, t.coeff) {
+                t.coeff = folded;
+            }
+        }
     }
     quotient.sort_by(|a, b| b.exp.cmp(&a.exp));
     remove_zero_terms(pool, &mut remainder);
@@ -616,20 +635,63 @@ pub fn collect_var(pool: &mut ExprPool, expr: ExprId, var: ExprId) -> ExprId {
 }
 
 /// GCD of two polynomials (Euclidean). Used when SimplifierConfig::gcd = true.
+///
+/// `b` is monic-normalized at every iteration (when its leading coefficient
+/// is numeric): without that, leading coefficients accumulate `Div` nodes
+/// across iterations and the final GCD's `is_unit` check fails for results
+/// that are mathematically `1` but structurally `Div(1,1)`. `simplify_div`
+/// would then refuse to cancel legitimate factors. Symbolic leading
+/// coefficients are left alone — dividing by them would just move the same
+/// `Div` clutter into every coefficient.
 pub fn poly_gcd(pool: &mut ExprPool, f: &UnivPoly, g: &UnivPoly) -> UnivPoly {
     if f.is_empty() { return g.to_vec(); }
     if g.is_empty() { return f.to_vec(); }
     let mut a = f.to_vec();
     let mut b = g.to_vec();
+    make_monic(pool, &mut b);
     loop {
         match poly_div(pool, &a, &b) {
             Ok((_, r)) if r.is_empty() => return b,
-            Ok((_, r)) => { a = b; b = r; }
+            Ok((_, r)) => {
+                a = b;
+                b = r;
+                make_monic(pool, &mut b);
+            }
             Err(_) => {
                 let one = pool.one;
                 return vec![Term { exp: 0, coeff: one }];
             }
         }
+    }
+}
+
+/// Divide every coefficient by the leading coefficient when it folds to a
+/// numeric atom. No-op for empty polys, polys whose leading coefficient is
+/// already `1`, and polys whose leading coefficient is symbolic.
+fn make_monic(pool: &mut ExprPool, poly: &mut UnivPoly) {
+    if poly.is_empty() {
+        return;
+    }
+    let lead = poly[0].coeff;
+    if pool.is_one(lead) {
+        return;
+    }
+    let lead_atom = fold_numeric(pool, lead).unwrap_or(lead);
+    if !matches!(
+        pool.get(lead_atom),
+        ExprNode::SmallInt(_) | ExprNode::BigInt(_) | ExprNode::Rational(_)
+    ) {
+        return;
+    }
+    if pool.is_one(lead_atom) {
+        // Leading already 1 after folding — just rebind so callers see the
+        // canonical atom in `poly[0].coeff` for downstream `is_unit` checks.
+        poly[0].coeff = lead_atom;
+        return;
+    }
+    for t in poly.iter_mut() {
+        let div = pool.div(t.coeff, lead_atom);
+        t.coeff = fold_numeric(pool, div).unwrap_or(div);
     }
 }
 
@@ -753,6 +815,65 @@ mod tests {
         let (q, r) = poly_div(&mut pool, &f, &g).unwrap();
         assert_eq!(r.len(), 0, "remainder should be zero");
         assert_eq!(q.len(), 2, "quotient should be x + 1");
+    }
+
+    #[test]
+    fn poly_div_returns_canonical_atoms() {
+        // Regression: `pool.div(r_lead, g_lead)` previously left raw Div
+        // nodes in quotient coefficients even when both sides were the
+        // same integer. With `fold_numeric` post-processing, dividing two
+        // monic polynomials yields quotient coefficients that are
+        // canonical SmallInt atoms — not Div(1,1).
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let two_int = pool.small_int(2);
+        let x2 = pool.pow(x, two_int);
+        let one = pool.one;
+        let neg_one = pool.neg(one);
+        let f_expr = pool.add(vec![x2, neg_one]);
+        let f = view_mut(&mut pool, f_expr, x).unwrap();
+        let neg_one_id = pool.neg(one);
+        let g = vec![
+            Term { exp: 1, coeff: one },
+            Term { exp: 0, coeff: neg_one_id },
+        ];
+        let (q, _r) = poly_div(&mut pool, &f, &g).unwrap();
+        for t in &q {
+            assert!(
+                !matches!(pool.get(t.coeff), ExprNode::Div(_, _)),
+                "quotient coefficient at exp {} must not be a raw Div node, got {:?}",
+                t.exp,
+                pool.get(t.coeff)
+            );
+        }
+    }
+
+    #[test]
+    fn poly_gcd_returns_canonical_one_for_coprime_inputs() {
+        // gcd(x^2 + 2x + 1, x + 1) = (x + 1) in Q[x]; after make_monic
+        // the leading coefficient is exactly `pool.one`. Then
+        // gcd(remainder of dividing one by the other) terminates with
+        // a single-term constant whose coefficient is `pool.one` —
+        // is_unit predicates (simplify_div etc.) can match on it.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let one = pool.one;
+        let two = pool.small_int(2);
+        let two_int = pool.small_int(2);
+        let x2 = pool.pow(x, two_int);
+        let two_x = pool.mul(vec![two, x]);
+        let f_expr = pool.add(vec![x2, two_x, one]); // x^2 + 2x + 1
+        let g_expr = pool.add(vec![x, one]);          // x + 1
+        let f = view_mut(&mut pool, f_expr, x).unwrap();
+        let g = view_mut(&mut pool, g_expr, x).unwrap();
+        let gcd = poly_gcd(&mut pool, &f, &g);
+        // GCD is monic (leading coefficient is `pool.one`), not Div(1,1).
+        assert!(!gcd.is_empty());
+        assert!(
+            pool.is_one(gcd[0].coeff),
+            "gcd leading coefficient must be canonical 1, got {:?}",
+            pool.get(gcd[0].coeff)
+        );
     }
 
     #[test]

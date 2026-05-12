@@ -84,6 +84,36 @@ pub fn fold_numeric(pool: &mut ExprPool, expr: ExprId) -> Option<ExprId> {
                 _ => None,
             }
         }
+        ExprNode::Div(num, den) => {
+            // (np/nq) / (dp/dq) = (np*dq) / (nq*dp).
+            //
+            // Without this arm `pool.div(a, b)` — produced by `poly_div`
+            // and other ad-hoc rational constructions — leaves a raw `Div`
+            // node behind. `is_numerically_zero`, `is_unit`, and the GCD
+            // pipeline all key off canonical atoms, so folding numeric
+            // Div trees here keeps those callers honest.
+            let np = fold_numeric(pool, num)?;
+            let dp = fold_numeric(pool, den)?;
+            let (np, nq) = as_rational(pool, np)?;
+            let (dp, dq) = as_rational(pool, dp)?;
+            if dp.is_zero() {
+                return None;
+            }
+            Some(pool.rational(np * dq, nq * dp))
+        }
+        _ => None,
+    }
+}
+
+/// Extract `(numerator, denominator)` for a numeric atom. Returns `None`
+/// for `Float` (the rational accumulator can't represent it) or any
+/// non-atom node.
+fn as_rational(pool: &ExprPool, id: ExprId) -> Option<(BigInt, BigInt)> {
+    use num_traits::One;
+    match pool.get(id) {
+        ExprNode::SmallInt(n) => Some((BigInt::from(*n), BigInt::one())),
+        ExprNode::BigInt(b) => Some(((**b).clone(), BigInt::one())),
+        ExprNode::Rational(b) => Some((b.0.clone(), b.1.clone())),
         _ => None,
     }
 }
