@@ -2,6 +2,8 @@ use crate::error::KernelError;
 use crate::expr::{ExprId, ExprNode, ExprPool};
 use crate::poly::{coeff, deg};
 use crate::simplify::{simplify, SimplifierConfig, SimplifyCache};
+use num_bigint::BigInt;
+use num_rational::BigRational;
 
 pub type Substitution = Vec<(ExprId, ExprId)>;
 
@@ -253,6 +255,203 @@ fn classify_discriminant(pool: &ExprPool, expr: ExprId) -> Option<DiscSign> {
     }
 }
 
+/// Evaluate `expr` to a `BigRational` given exact bindings for free symbols,
+/// returning `None` on any subterm that can't be exactly evaluated.
+///
+/// "Can't" here means: `Float` atoms, `Fn` / `String` / unrecognized nodes,
+/// `Pow` with a non-`SmallInt` exponent or with `i32`-overflowing exponent,
+/// `0^(negative)`, division by zero, and free `Symbol`s outside `bindings`.
+/// The caller treats `None` as "fall back to f64" — it is not an error.
+fn evaluate_exact(
+    pool: &ExprPool,
+    bindings: &[(ExprId, BigRational)],
+    expr: ExprId,
+) -> Option<BigRational> {
+    use num_traits::{Pow, Zero};
+    match pool.get(expr) {
+        ExprNode::SmallInt(n) => Some(BigRational::from(BigInt::from(*n))),
+        ExprNode::BigInt(n) => Some(BigRational::from((**n).clone())),
+        ExprNode::Rational(b) => Some(BigRational::new(b.0.clone(), b.1.clone())),
+        ExprNode::Float(_) => None,
+        ExprNode::Symbol(_) => bindings
+            .iter()
+            .find(|(id, _)| *id == expr)
+            .map(|(_, v)| v.clone()),
+        ExprNode::Neg(x) => Some(-evaluate_exact(pool, bindings, *x)?),
+        ExprNode::Add(children) => {
+            let mut acc = BigRational::zero();
+            for c in children.iter() {
+                acc += evaluate_exact(pool, bindings, *c)?;
+            }
+            Some(acc)
+        }
+        ExprNode::Mul(children) => {
+            let mut acc = BigRational::from(BigInt::from(1));
+            for c in children.iter() {
+                acc *= evaluate_exact(pool, bindings, *c)?;
+            }
+            Some(acc)
+        }
+        ExprNode::Div(num, den) => {
+            let n = evaluate_exact(pool, bindings, *num)?;
+            let d = evaluate_exact(pool, bindings, *den)?;
+            if d.is_zero() {
+                return None;
+            }
+            Some(n / d)
+        }
+        ExprNode::Pow(base, exp) => {
+            // Integer exponents only — fractional or symbolic exponents
+            // can't be exactly represented as a BigRational result.
+            let b = evaluate_exact(pool, bindings, *base)?;
+            let e: i64 = match pool.get(*exp) {
+                ExprNode::SmallInt(n) => *n,
+                _ => return None,
+            };
+            if b.is_zero() && e < 0 {
+                return None;
+            }
+            // `Ratio::pow` takes i32; |e| > i32::MAX with |base| >= 2 would
+            // exhaust memory long before producing a result, so bailing is
+            // the right call. (Mirrors `fold_smallint_pow`'s u32 bound.)
+            let e32: i32 = i32::try_from(e).ok()?;
+            Some(Pow::pow(b, e32))
+        }
+        _ => None,
+    }
+}
+
+/// Attempt to solve the linear system exactly over `BigRational`. Returns
+/// `None` to signal "fall back to f64" (any subterm that didn't evaluate
+/// exactly); otherwise the result — which may itself be `Err` (nonlinear /
+/// cross-term / singular) and should be returned to the caller as-is.
+fn try_solve_system_exact(
+    pool: &mut ExprPool,
+    equations: &[ExprId],
+    vars: &[ExprId],
+) -> Option<Result<SolutionSet, KernelError>> {
+    use num_traits::{One, Zero};
+
+    let n = vars.len();
+    let zero = BigRational::zero();
+    let one = BigRational::one();
+    let two = BigRational::from(BigInt::from(2));
+
+    let zero_bindings: Vec<(ExprId, BigRational)> =
+        vars.iter().map(|&v| (v, zero.clone())).collect();
+
+    let mut mat: Vec<Vec<BigRational>> = Vec::with_capacity(n);
+
+    for (eq_idx, &eq) in equations.iter().enumerate() {
+        let (lhs, rhs) = match pool.get(eq) {
+            ExprNode::Eq(l, r) => (*l, *r),
+            _ => (eq, pool.zero),
+        };
+        let rhs_neg = pool.neg(rhs);
+        let poly_expr = pool.add(vec![lhs, rhs_neg]);
+
+        let const_val = evaluate_exact(pool, &zero_bindings, poly_expr)?;
+
+        let mut row: Vec<BigRational> = Vec::with_capacity(n + 1);
+        for j in 0..n {
+            let mut bj = zero_bindings.clone();
+            bj[j].1 = one.clone();
+            let ej = evaluate_exact(pool, &bj, poly_expr)?;
+            row.push(ej - &const_val);
+        }
+
+        // Exact linearity probes — equality is exact, so no tolerance.
+        for j in 0..n {
+            let mut bj = zero_bindings.clone();
+            bj[j].1 = two.clone();
+            let probed = evaluate_exact(pool, &bj, poly_expr)?;
+            let predicted = &row[j] * &two + &const_val;
+            if probed != predicted {
+                return Some(Err(KernelError::UnsupportedEquation {
+                    reason: format!(
+                        "equation {} is nonlinear in variable index {}",
+                        eq_idx, j
+                    ),
+                }));
+            }
+        }
+        for i in 0..n {
+            for k in (i + 1)..n {
+                let mut b_ik = zero_bindings.clone();
+                b_ik[i].1 = one.clone();
+                b_ik[k].1 = one.clone();
+                let probed = evaluate_exact(pool, &b_ik, poly_expr)?;
+                let predicted = &row[i] + &row[k] + &const_val;
+                if probed != predicted {
+                    return Some(Err(KernelError::UnsupportedEquation {
+                        reason: format!(
+                            "equation {} contains a cross-term between \
+                             variable indices {} and {}",
+                            eq_idx, i, k
+                        ),
+                    }));
+                }
+            }
+        }
+
+        row.push(-&const_val);
+        mat.push(row);
+    }
+
+    // Exact Gaussian elimination. Partial pivoting is unnecessary for
+    // numerical stability (no rounding error in BigRational), so we just
+    // walk down each column looking for the first nonzero pivot.
+    for col in 0..n {
+        let mut pivot_row = col;
+        while pivot_row < n && mat[pivot_row][col].is_zero() {
+            pivot_row += 1;
+        }
+        if pivot_row == n {
+            return Some(Err(KernelError::SingularSystem));
+        }
+        mat.swap(col, pivot_row);
+        let pivot = mat[col][col].clone();
+        for row in (col + 1)..n {
+            if mat[row][col].is_zero() {
+                continue;
+            }
+            let factor = &mat[row][col] / &pivot;
+            for k in col..=n {
+                let v = mat[col][k].clone();
+                mat[row][k] = &mat[row][k] - &factor * &v;
+            }
+        }
+    }
+
+    // Back-substitution.
+    let mut solution = vec![BigRational::zero(); n];
+    for i in (0..n).rev() {
+        let mut s = mat[i][n].clone();
+        for j in (i + 1)..n {
+            s = &s - &mat[i][j] * &solution[j];
+        }
+        if mat[i][i].is_zero() {
+            return Some(Err(KernelError::SingularSystem));
+        }
+        solution[i] = &s / &mat[i][i];
+    }
+
+    let binding: Substitution = vars
+        .iter()
+        .zip(solution.into_iter())
+        .map(|(&var, val)| {
+            let p = val.numer().clone();
+            let q = val.denom().clone();
+            (var, pool.rational(p, q))
+        })
+        .collect();
+
+    Some(Ok(SolutionSet {
+        solutions: vec![binding],
+        has_complex_roots: false,
+    }))
+}
+
 /// Solve a linear n x n system of equations (numeric coefficients only) via
 /// Gaussian elimination with partial pivoting.
 ///
@@ -273,6 +472,12 @@ fn classify_discriminant(pool: &ExprPool, expr: ExprId) -> Option<DiscSign> {
 /// Phase 1 limitation: coefficients must be numeric (BigInt / Rational /
 /// Float). Symbolic coefficients return `UnsupportedEquation`. Multivariate
 /// polynomial extraction is deferred to Phase 2.
+///
+/// **Exactness:** when every coefficient is exact (Int / BigInt / Rational
+/// with integer exponents only), the system is eliminated in `BigRational`
+/// and the returned bindings are exact `pool.rational(...)` atoms. The
+/// `f64` path is used only when the equations contain `Float` atoms or
+/// unsupported subterms (transcendentals, irrational symbols).
 pub fn solve_system(
     pool: &mut ExprPool,
     equations: &[ExprId],
@@ -295,6 +500,14 @@ pub fn solve_system(
         if !matches!(pool.get(v), ExprNode::Symbol(_)) {
             return Err(KernelError::NotASymbol);
         }
+    }
+
+    // Fast path: if every subterm evaluates exactly, eliminate over
+    // BigRational and return rational/integer atoms. `None` from the helper
+    // means a subterm could not be exactly evaluated (Float, transcendental,
+    // non-integer exponent, unbound symbol) — fall through to f64.
+    if let Some(result) = try_solve_system_exact(pool, equations, vars) {
+        return result;
     }
 
     let zero_bindings: Vec<(ExprId, f64)> =
@@ -681,6 +894,102 @@ mod tests {
         let y_val = crate::evalnum::evaluate_numeric(&pool, &[], binding[1].1).unwrap();
         assert!((x_val - 2.0).abs() < 1e-9);
         assert!((y_val - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn solve_system_integer_input_returns_exact_atoms() {
+        // 2x + y = 5
+        //  x - y = 1   →  x = 2, y = 1
+        // With all-integer coefficients, the bindings must be exact
+        // SmallInt atoms, not Float(2.0) / Float(1.0) — otherwise every
+        // downstream pipeline (substitution, differentiation, golden tests)
+        // ends up mixing Float with exact atoms.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let two = pool.small_int(2);
+        let neg_one = pool.small_int(-1);
+        let five = pool.small_int(5);
+        let one = pool.one;
+
+        let two_x = pool.mul(vec![two, x]);
+        let lhs1 = pool.add(vec![two_x, y]);
+        let eq1 = pool.eq_node(lhs1, five);
+
+        let neg_y = pool.mul(vec![neg_one, y]);
+        let lhs2 = pool.add(vec![x, neg_y]);
+        let eq2 = pool.eq_node(lhs2, one);
+
+        let result = solve_system(&mut pool, &[eq1, eq2], &[x, y]).unwrap();
+        let binding = &result.solutions[0];
+        assert!(
+            matches!(pool.get(binding[0].1), ExprNode::SmallInt(2)),
+            "x must be exact SmallInt(2), got {:?}",
+            pool.get(binding[0].1)
+        );
+        assert!(
+            matches!(pool.get(binding[1].1), ExprNode::SmallInt(1)),
+            "y must be exact SmallInt(1), got {:?}",
+            pool.get(binding[1].1)
+        );
+    }
+
+    #[test]
+    fn solve_system_rational_input_returns_rational_atom() {
+        // 3x = 1, y = 2  →  x = 1/3, y = 2
+        // x must come back as Rational(1, 3) — not a Float approximation.
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let three = pool.small_int(3);
+        let one = pool.one;
+        let two = pool.small_int(2);
+
+        let three_x = pool.mul(vec![three, x]);
+        let eq1 = pool.eq_node(three_x, one);
+        let eq2 = pool.eq_node(y, two);
+
+        let result = solve_system(&mut pool, &[eq1, eq2], &[x, y]).unwrap();
+        let binding = &result.solutions[0];
+        match pool.get(binding[0].1) {
+            ExprNode::Rational(b) => {
+                assert_eq!(b.0, BigInt::from(1));
+                assert_eq!(b.1, BigInt::from(3));
+            }
+            other => panic!("x must be Rational(1,3), got {:?}", other),
+        }
+        assert!(matches!(pool.get(binding[1].1), ExprNode::SmallInt(2)));
+    }
+
+    #[test]
+    fn solve_system_float_input_falls_back_to_f64() {
+        // Coefficient `1.5` is a Float — the exact path returns None on
+        // that subterm, so we must fall back to the f64 elimination and
+        // emit Float atoms. (Regression: a bug in the screen would either
+        // panic or silently misclassify the Float.)
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let half = pool.float(1.5);
+        let one = pool.one;
+        let two = pool.small_int(2);
+        let three = pool.small_int(3);
+
+        // 1.5*x + y = 3,  x - y = 2  →  x = 2, y = 0 (but Float-tainted)
+        let half_x = pool.mul(vec![half, x]);
+        let lhs1 = pool.add(vec![half_x, y]);
+        let eq1 = pool.eq_node(lhs1, three);
+        let neg_y = pool.neg(y);
+        let lhs2 = pool.add(vec![x, neg_y]);
+        let eq2 = pool.eq_node(lhs2, two);
+
+        let result = solve_system(&mut pool, &[eq1, eq2], &[x, y]).unwrap();
+        let binding = &result.solutions[0];
+        assert!(
+            matches!(pool.get(binding[0].1), ExprNode::Float(_)),
+            "x must be a Float atom (f64 fallback), got {:?}",
+            pool.get(binding[0].1)
+        );
     }
 
     #[test]
