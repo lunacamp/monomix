@@ -1,0 +1,295 @@
+# 50 differentiation examples (textbook suite per SCOPE.md §1.12)
+
+[[entries]]
+input = "df(x, x);"
+expected = "1"
+ignore = false
+
+[[entries]]
+input = "df(1, x);"
+expected = "0"
+ignore = false
+
+[[entries]]
+input = "df(x^2, x);"
+expected = "2*x"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^3, x);"
+expected = "3*x^2"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^10, x);"
+expected = "10*x^9"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x + 1, x);"
+expected = "1"
+ignore = false
+
+[[entries]]
+input = "df(2*x, x);"
+expected = "2"
+ignore = false
+
+[[entries]]
+input = "df(x^2 + x, x);"
+expected = "2*x + 1"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x*y, x);"
+expected = "y"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^2*y^2, x);"
+expected = "2*x*y^2"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(sin(x), x);"
+expected = "cos(x)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(cos(x), x);"
+expected = "-sin(x)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(exp(x), x);"
+expected = "e^x"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(log(x), x);"
+expected = "1/x"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(sqrt(x), x);"
+expected = "1/(2*sqrt(x))"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^2 + 2*x + 1, x);"
+expected = "2*x + 2"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(1/x, x);"
+expected = "-1/x^2"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^3 - 3*x^2 + 3*x - 1, x);"
+expected = "3*x^2 - 6*x + 3"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(sin(x^2), x);"
+expected = "2*x*cos(x^2)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x*sin(x), x);"
+expected = "sin(x) + x*cos(x)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x/sin(x), x);"
+expected = "(sin(x) - x*cos(x))/sin(x)^2"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(atan(x), x);"
+expected = "1/(1 + x^2)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(asin(x), x);"
+expected = "1/sqrt(1 - x^2)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(acos(x), x);"
+expected = "-1/sqrt(1 - x^2)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(tan(x), x);"
+expected = "1/cos(x)^2"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^x, x);"
+expected = "x^x*(1 + log(x))"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(exp(sin(x)), x);"
+expected = "cos(x)*exp(sin(x))"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(log(x^2 + 1), x);"
+expected = "2*x/(x^2 + 1)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^4 - 4*x^3 + 6*x^2 - 4*x + 1, x);"
+expected = "4*x^3 - 12*x^2 + 12*x - 4"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(a*x^2 + b*x + c, x);"
+expected = "2*a*x + b"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^5, x);"
+expected = "5*x^4"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(2*x^3 + 5*x^2 - 3*x + 7, x);"
+expected = "6*x^2 + 10*x - 3"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(sin(x) + cos(x), x);"
+expected = "cos(x) - sin(x)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(sin(x)*cos(x), x);"
+expected = "cos(x)^2 - sin(x)^2"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(exp(x)*sin(x), x);"
+expected = "exp(x)*(sin(x) + cos(x))"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(log(sin(x)), x);"
+expected = "cos(x)/sin(x)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^2*exp(x), x);"
+expected = "x^2*exp(x) + 2*x*exp(x)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(1/(x^2 + 1), x);"
+expected = "-2*x/(x^2 + 1)^2"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df((x + 1)^5, x);"
+expected = "5*(x + 1)^4"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(sqrt(x^2 + 1), x);"
+expected = "x/sqrt(x^2 + 1)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x*log(x), x);"
+expected = "log(x) + 1"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(exp(x^2), x);"
+expected = "2*x*exp(x^2)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(sin(x)^2, x);"
+expected = "2*sin(x)*cos(x)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(cos(x)^2, x);"
+expected = "-2*sin(x)*cos(x)"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(sin(x)^2 + cos(x)^2, x);"
+expected = "0"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^3 + y^3, x);"
+expected = "3*x^2"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^2 + y^2, x);"
+expected = "2*x"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(x^2*y + x*y^2, x);"
+expected = "2*x*y + y^2"
+ignore = true
+ignore_reason = "df() result display not yet implemented"
+
+[[entries]]
+input = "df(a*x, x);"
+expected = "a"
+ignore = false
+
+[[entries]]
+input = "df(a*x + b, x);"
+expected = "a"
+ignore = false

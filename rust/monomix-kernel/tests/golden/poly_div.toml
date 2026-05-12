@@ -1,0 +1,78 @@
+# ~15 curated polynomial division expressions from polydiv.tst / polydiv.rlg.
+# Only explicit-multiplication, no implicit multiplication (e.g. 3x^4 is invalid Phase 1 syntax).
+# Operations: parse succeeds + expression is polynomial in the primary variable.
+
+[[entries]]
+input = "x^2 - 1;"
+expected = "x^2 - 1"
+ignore = false
+
+[[entries]]
+input = "x^3 + x^2 - x - 1;"
+expected = "x^3 + x^2 - x - 1"
+ignore = false
+
+[[entries]]
+input = "x^4 - 1;"
+expected = "x^4 - 1"
+ignore = false
+
+[[entries]]
+input = "x^5 - x^3 + x^2 - 1;"
+expected = "x^5 - x^3 + x^2 - 1"
+ignore = false
+
+[[entries]]
+input = "2*x^3 + 3*x^2 - 2;"
+expected = "2*x^3 + 3*x^2 - 2"
+ignore = false
+
+[[entries]]
+input = "x^2 + 2*x + 1;"
+expected = "x^2 + 2*x + 1"
+ignore = false
+
+[[entries]]
+input = "x^2 - 2*x + 1;"
+expected = "x^2 - 2*x + 1"
+ignore = false
+
+[[entries]]
+input = "x^4 + 2*x^3 + x^2;"
+expected = "x^4 + 2*x^3 + x^2"
+ignore = false
+
+[[entries]]
+input = "x^6 - x^3 - 1;"
+expected = "x^6 - x^3 - 1"
+ignore = false
+
+[[entries]]
+input = "3*x^6 + 5*x^4 - 4*x^2 - 9*x + 21;"
+expected = "3*x^6 + 5*x^4 - 4*x^2 - 9*x + 21"
+ignore = false
+
+[[entries]]
+input = "x^8 + x^6 - 3*x^4 - 3*x^3 + 8*x^2 + 2*x - 5;"
+expected = "x^8 + x^6 - 3*x^4 - 3*x^3 + 8*x^2 + 2*x - 5"
+ignore = false
+
+[[entries]]
+input = "a*x^2 + b*x + c;"
+expected = "a*x^2 + b*x + c"
+ignore = false
+
+[[entries]]
+input = "x^2*y - x*y^2;"
+expected = "x^2*y - x*y^2"
+ignore = false
+
+[[entries]]
+input = "p*x^3 + q*x^2 - r;"
+expected = "p*x^3 + q*x^2 - r"
+ignore = false
+
+[[entries]]
+input = "x^2 + 1;"
+expected = "x^2 + 1"
+ignore = false

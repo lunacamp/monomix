@@ -1,0 +1,14 @@
+pub mod diff;
+pub mod error;
+pub mod evalnum;
+pub mod expr;
+pub mod parser;
+pub mod poly;
+pub mod simplify;
+pub mod solve;
+pub mod substitute;
+
+pub use diff::differentiate;
+pub use error::KernelError;
+pub use expr::{ExprId, ExprNode, ExprPool, FnTag, InternedStr, LocalExprId};
+pub use parser::{parse, ast::ParseResult};
