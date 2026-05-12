@@ -85,6 +85,23 @@ impl Tally {
             manifest, self.verified, self.smoke, self.skipped
         );
     }
+
+    /// Enforce a soft per-manifest floor on `VERIFIED` count. Catches the
+    /// rot-mode where new entries get added as `ignore = true` (or
+    /// downgraded to `SMOKE:` parse-only) faster than verified ones land —
+    /// silently shrinking real regression coverage even as the manifest
+    /// grows. The floor is conservative (matches the existing baseline);
+    /// raise it when a manifest's verified count climbs durably.
+    fn assert_min_verified(&self, manifest: &str, min_verified: usize) {
+        assert!(
+            self.verified >= min_verified,
+            "manifest {} has only {} VERIFIED entries (floor {}); the corpus \
+             is rotting. Either re-verify some {} skipped / {} smoke entries, \
+             or — if a regression in feature support is the cause — lower \
+             the floor with an explicit rationale.",
+            manifest, self.verified, min_verified, self.skipped, self.smoke
+        );
+    }
 }
 
 /// Parse a single-statement source. Appends a terminator if missing. Returns
@@ -122,7 +139,7 @@ fn simplify_id(pool: &mut ExprPool, id: ExprId) -> ExprId {
 /// Runner for `alg_expr.toml` and `simplify.toml`: simplify(input) and
 /// simplify(expected) must produce the same `ExprId`. Falls back to parse-
 /// smoke when `expected` doesn't parse in the Phase 1 subset.
-fn run_simplify_match(path: &str) {
+fn run_simplify_match(path: &str, min_verified: usize) {
     let manifest = load_manifest(path);
     let mut t = Tally::default();
     for entry in &manifest.entries {
@@ -160,12 +177,13 @@ fn run_simplify_match(path: &str) {
         }
     }
     t.print_summary(path);
+    t.assert_min_verified(path, min_verified);
 }
 
 /// Runner for `diff.toml`: each input is a `df(target, var)` call.
 /// Extract the args, run `differentiate`, simplify, compare with simplified
 /// `expected`. Inputs that aren't `df(...)` calls fall through to smoke.
-fn run_diff_match(path: &str) {
+fn run_diff_match(path: &str, min_verified: usize) {
     let manifest = load_manifest(path);
     let mut t = Tally::default();
     for entry in &manifest.entries {
@@ -218,11 +236,12 @@ fn run_diff_match(path: &str) {
         }
     }
     t.print_summary(path);
+    t.assert_min_verified(path, min_verified);
 }
 
 /// Runner for `poly_div.toml`: every non-ignored entry must be polynomial in
 /// `x`. `expected` is informational (typically the same as input).
-fn run_poly_check(path: &str) {
+fn run_poly_check(path: &str, min_verified: usize) {
     let manifest = load_manifest(path);
     let mut t = Tally::default();
     for entry in &manifest.entries {
@@ -244,12 +263,13 @@ fn run_poly_check(path: &str) {
         println!("POLY-OK: {}", entry.input);
     }
     t.print_summary(path);
+    t.assert_min_verified(path, min_verified);
 }
 
 /// Runner for `solve_linear_quadratic.toml`: `expected` is descriptive
 /// English ("parseable linear", "parseable quadratic ..."). Match on the
 /// keyword and assert `deg(input, x)` is consistent.
-fn run_solve_form(path: &str) {
+fn run_solve_form(path: &str, min_verified: usize) {
     let manifest = load_manifest(path);
     let mut t = Tally::default();
     for entry in &manifest.entries {
@@ -293,29 +313,55 @@ fn run_solve_form(path: &str) {
         }
     }
     t.print_summary(path);
+    t.assert_min_verified(path, min_verified);
 }
+
+// Per-manifest VERIFIED floors. Set just below current baselines so a
+// modest amount of churn doesn't trip the assertion, but a wholesale
+// downgrade of entries to `ignore = true` / `SMOKE:` does. Bump when a
+// manifest's verified count climbs durably.
+const MIN_VERIFIED_ALG_EXPR: usize = 10;
+const MIN_VERIFIED_SIMPLIFY: usize = 10;
+const MIN_VERIFIED_DIFF: usize = 5;
+const MIN_VERIFIED_POLY_DIV: usize = 10;
+const MIN_VERIFIED_SOLVE: usize = 5;
 
 #[test]
 fn golden_alg_expr() {
-    run_simplify_match(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/alg_expr.toml"));
+    run_simplify_match(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/alg_expr.toml"),
+        MIN_VERIFIED_ALG_EXPR,
+    );
 }
 
 #[test]
 fn golden_simplify() {
-    run_simplify_match(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/simplify.toml"));
+    run_simplify_match(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/simplify.toml"),
+        MIN_VERIFIED_SIMPLIFY,
+    );
 }
 
 #[test]
 fn golden_diff() {
-    run_diff_match(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/diff.toml"));
+    run_diff_match(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/diff.toml"),
+        MIN_VERIFIED_DIFF,
+    );
 }
 
 #[test]
 fn golden_poly_div() {
-    run_poly_check(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/poly_div.toml"));
+    run_poly_check(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/poly_div.toml"),
+        MIN_VERIFIED_POLY_DIV,
+    );
 }
 
 #[test]
 fn golden_solve() {
-    run_solve_form(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/solve_linear_quadratic.toml"));
+    run_solve_form(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/solve_linear_quadratic.toml"),
+        MIN_VERIFIED_SOLVE,
+    );
 }
