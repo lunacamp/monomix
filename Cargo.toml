@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members  = ["rust/solver-bridge", "rust/monomix-kernel"]
+members  = ["rust/solver-bridge", "rust/monomix-kernel", "rust/monomix-py"]
 
 # Shared metadata inherited by member crates via `field.workspace = true`.
 # Add new crates (e.g. the kernel) under `members` as they appear.
