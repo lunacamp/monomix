@@ -112,6 +112,19 @@ mod tests {
     }
 
     #[test]
+    fn differentiate_lt_is_unsupported() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let lt = pool.lt(x, y);
+        let result = differentiate(&mut pool, lt, x);
+        assert!(matches!(
+            result,
+            Err(crate::error::KernelError::UnsupportedEquation { .. })
+        ));
+    }
+
+    #[test]
     fn diff_cache_per_call() {
         let mut pool = ExprPool::new();
         let x = pool.symbol("x");
