@@ -978,6 +978,88 @@ mod tests {
             panic!("expected Symbol");
         }
     }
+
+    #[test]
+    fn not_double_negation() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let not_x = pool.not_node(x);
+        let not_not_x = pool.not_node(not_x);
+        assert_eq!(not_not_x, x);
+    }
+
+    #[test]
+    fn not_of_bool_const_folds() {
+        let mut pool = ExprPool::new();
+        let t = pool.bool_const(true);
+        let f = pool.bool_const(false);
+        assert_eq!(pool.not_node(t), f);
+        assert_eq!(pool.not_node(f), t);
+    }
+
+    #[test]
+    fn and_short_circuits_on_false() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let f = pool.bool_const(false);
+        assert_eq!(pool.and_(vec![x, f]), f);
+    }
+
+    #[test]
+    fn and_drops_true_operands() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let t = pool.bool_const(true);
+        assert_eq!(pool.and_(vec![x, t]), x);
+    }
+
+    #[test]
+    fn or_short_circuits_on_true() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let t = pool.bool_const(true);
+        assert_eq!(pool.or_(vec![x, t]), t);
+    }
+
+    #[test]
+    fn or_drops_false_operands() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let f = pool.bool_const(false);
+        assert_eq!(pool.or_(vec![x, f]), x);
+    }
+
+    #[test]
+    fn and_flattens() {
+        let mut pool = ExprPool::new();
+        let a = pool.symbol("a");
+        let b = pool.symbol("b");
+        let c = pool.symbol("c");
+        let ab = pool.and_(vec![a, b]);
+        let abc = pool.and_(vec![ab, c]);
+        let expected = pool.and_(vec![a, b, c]);
+        assert_eq!(abc, expected);
+    }
+
+    #[test]
+    fn and_sorts_and_dedups() {
+        let mut pool = ExprPool::new();
+        let a = pool.symbol("a");
+        let b = pool.symbol("b");
+        let ab = pool.and_(vec![a, b, a]);
+        let ba = pool.and_(vec![b, a]);
+        assert_eq!(ab, ba);
+    }
+
+    #[test]
+    fn bool_const_interning_idempotent() {
+        let mut pool = ExprPool::new();
+        let t1 = pool.bool_const(true);
+        let t2 = pool.bool_const(true);
+        assert_eq!(t1, t2);
+        let f1 = pool.bool_const(false);
+        assert_ne!(t1, f1);
+    }
 }
 
 #[cfg(test)]
