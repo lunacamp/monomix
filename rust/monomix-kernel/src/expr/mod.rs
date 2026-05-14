@@ -57,6 +57,19 @@ pub enum ExprNode {
     Eq(ExprId, ExprId),
     Fn(FnTag, Box<[ExprId]>),
     List(Box<[ExprId]>),
+
+    // Comparison
+    Lt(ExprId, ExprId),
+    Le(ExprId, ExprId),
+    Gt(ExprId, ExprId),
+    Ge(ExprId, ExprId),
+
+    // Propositional
+    Not(ExprId),
+    And(Box<[ExprId]>),
+    Or(Box<[ExprId]>),
+    Implies(ExprId, ExprId),
+    BoolConst(bool),
 }
 
 // Compile-time size guard — fails compilation if ExprNode exceeds the
@@ -735,6 +748,23 @@ mod tests {
         let b = pool.symbol("b");
         let sum = pool.add(vec![a, b]);
         assert_eq!(pool.subtree_size(sum), 3); // Add + 2 children
+    }
+
+    #[test]
+    fn new_variants_exist_and_intern() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let _ = pool.lt(x, y);
+        let _ = pool.le(x, y);
+        let _ = pool.gt(x, y);
+        let _ = pool.ge(x, y);
+        let _ = pool.not_node(x);
+        let _ = pool.and_(vec![x, y]);
+        let _ = pool.or_(vec![x, y]);
+        let _ = pool.implies(x, y);
+        let _ = pool.bool_const(true);
+        let _ = pool.bool_const(false);
     }
 
     #[test]
