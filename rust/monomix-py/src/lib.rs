@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 mod errors;
+mod expr;
 mod session;
 
 #[pymodule]
@@ -12,5 +13,6 @@ fn _kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("UnsupportedError", m.py().get_type_bound::<errors::UnsupportedError>())?;
     m.add("CrossSessionError", m.py().get_type_bound::<errors::CrossSessionError>())?;
     m.add_class::<session::SessionHandle>()?;
+    m.add_class::<expr::Expr>()?;
     Ok(())
 }
