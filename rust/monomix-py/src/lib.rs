@@ -18,5 +18,9 @@ fn _kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<expr::Expr>()?;
     m.add_function(wrap_pyfunction!(kernel_fns::simplify, m)?)?;
     m.add_function(wrap_pyfunction!(kernel_fns::df, m)?)?;
+    m.add_function(wrap_pyfunction!(kernel_fns::expand, m)?)?;
+    m.add_function(wrap_pyfunction!(kernel_fns::solve, m)?)?;
+    m.add_function(wrap_pyfunction!(kernel_fns::sub, m)?)?;
+    m.add_function(wrap_pyfunction!(kernel_fns::evaluate_numeric, m)?)?;
     Ok(())
 }

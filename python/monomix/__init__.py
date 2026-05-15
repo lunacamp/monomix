@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from monomix._kernel import Expr, df, simplify
+from monomix._kernel import (
+    Expr,
+    df,
+    evaluate_numeric,
+    expand,
+    simplify,
+    solve,
+    sub,
+)
 from monomix.errors import (
     CrossSessionError,
     EvalError,
@@ -18,7 +26,11 @@ __all__ = [
     "Expr",
     "Session",
     "df",
+    "evaluate_numeric",
+    "expand",
     "simplify",
+    "solve",
+    "sub",
     "MonomixError",
     "ParseError",
     "EvalError",

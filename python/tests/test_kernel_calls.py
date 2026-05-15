@@ -39,3 +39,45 @@ def test_df_cross_session_raises():
     var = s2.symbol("x")
     with pytest.raises(CrossSessionError):
         df(e, var)
+
+
+def test_expand_product():
+    from monomix import expand
+    s = Session()
+    x = s.symbol("x")
+    expr = (x + s.integer(1)) * (x + s.integer(1))
+    result = expand(expr)
+    assert result.kind == "Add"
+
+
+def test_solve_linear():
+    from monomix import solve
+    s = Session()
+    x = s.symbol("x")
+    eq = (x * s.integer(2) - s.integer(4)) == s.integer(0)
+    solutions = solve(eq, x)
+    assert len(solutions) >= 1
+
+
+def test_sub_replaces_symbol():
+    from monomix import sub
+    s = Session()
+    x = s.symbol("x")
+    expr = x + s.integer(1)
+    result = sub({x: s.integer(5)}, expr)
+    assert simplify(result).is_same(s.integer(6))
+
+
+def test_evaluate_numeric_constant():
+    from monomix import evaluate_numeric
+    s = Session()
+    e = s.integer(3) + s.integer(4)
+    assert evaluate_numeric(e) == pytest.approx(7.0)
+
+
+def test_evaluate_numeric_unbound_symbol_raises():
+    from monomix import EvalError, evaluate_numeric
+    s = Session()
+    x = s.symbol("x")
+    with pytest.raises(EvalError):
+        evaluate_numeric(x)
