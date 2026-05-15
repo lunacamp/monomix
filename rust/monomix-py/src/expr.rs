@@ -1,7 +1,36 @@
 use crate::errors::CrossSessionError;
 use monomix_kernel::{ExprId, ExprNode, ExprPool};
+use num_bigint::BigInt;
 use pyo3::prelude::*;
+use pyo3::types::PyAny;
 use std::sync::{Arc, Mutex};
+
+fn coerce_to_expr(
+    value: &Bound<'_, PyAny>,
+    pool: &Arc<Mutex<ExprPool>>,
+) -> PyResult<Expr> {
+    if let Ok(e) = value.extract::<PyRef<Expr>>() {
+        if !Arc::ptr_eq(&e.pool, pool) {
+            return Err(PyErr::new::<CrossSessionError, _>(
+                "Expr objects come from different Sessions",
+            ));
+        }
+        return Ok(Expr::new(Arc::clone(pool), e.id));
+    }
+    if let Ok(n) = value.extract::<BigInt>() {
+        let mut p = pool.lock().expect("pool mutex poisoned");
+        let id = p.integer(n);
+        return Ok(Expr::new(Arc::clone(pool), id));
+    }
+    if let Ok(f) = value.extract::<f64>() {
+        let mut p = pool.lock().expect("pool mutex poisoned");
+        let id = p.float(f);
+        return Ok(Expr::new(Arc::clone(pool), id));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "operand must be Expr, int, or float",
+    ))
+}
 
 #[pyclass(name = "Expr", module = "monomix._kernel", frozen)]
 pub struct Expr {
@@ -65,6 +94,96 @@ impl Expr {
             ExprNode::Implies(_, _) => "Implies",
             ExprNode::BoolConst(_) => "BoolConst",
         }
+    }
+
+    fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.add(vec![self.id, rhs.id]);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __radd__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let lhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.add(vec![lhs.id, self.id]);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let neg_b = pool.neg(rhs.id);
+        let id = pool.add(vec![self.id, neg_b]);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __rsub__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let lhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let neg_self = pool.neg(self.id);
+        let id = pool.add(vec![lhs.id, neg_self]);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.mul(vec![self.id, rhs.id]);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __rmul__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let lhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.mul(vec![lhs.id, self.id]);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __truediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.div(self.id, rhs.id);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __rtruediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let lhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.div(lhs.id, self.id);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __pow__(
+        &self,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.pow(self.id, rhs.id);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __rpow__(
+        &self,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Expr> {
+        let lhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.pow(lhs.id, self.id);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __neg__(&self) -> Expr {
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.neg(self.id);
+        Expr::new(Arc::clone(&self.pool), id)
+    }
+
+    fn __pos__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
     }
 }
 
