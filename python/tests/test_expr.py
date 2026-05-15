@@ -143,3 +143,23 @@ def test_invert_eq(x):
     a = (x == 0)
     e = ~a
     assert e.kind == "Not"
+
+
+def test_cross_session_add_raises():
+    from monomix import CrossSessionError
+    s1 = Session()
+    s2 = Session()
+    a = s1.symbol("x")
+    b = s2.symbol("y")
+    with pytest.raises(CrossSessionError):
+        _ = a + b
+
+
+def test_cross_session_eq_raises():
+    from monomix import CrossSessionError
+    s1 = Session()
+    s2 = Session()
+    a = s1.symbol("x")
+    b = s2.symbol("y")
+    with pytest.raises(CrossSessionError):
+        _ = (a == b)
