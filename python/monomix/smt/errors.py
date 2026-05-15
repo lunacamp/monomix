@@ -1,16 +1,20 @@
-"""Error types for the solver bridge.
+"""Error types for the SMT bridge.
 
 Kept in their own module so callers can `except Unsupported` without
-pulling in z3 itself.
+pulling in a backend.
 """
 
 
 class SolverError(Exception):
-    """Base class for solver bridge failures."""
+    """Base class for SMT bridge failures."""
 
 
 class BackendUnavailable(SolverError):
-    """The chosen backend (e.g. z3) is not installed in this environment."""
+    """The user-supplied backend cannot be initialised.
+
+    Raised by backend adapters (not by the bridge itself) when the
+    underlying solver isn't installed or refuses to start.
+    """
 
 
 class Unsupported(SolverError):
@@ -22,4 +26,8 @@ class Unsupported(SolverError):
 
 
 class TranslationError(SolverError):
-    """A Monomix IR node couldn't be translated to Z3."""
+    """A monomix Expr kind couldn't be translated.
+
+    Typically means a new ExprNode variant landed in the kernel and
+    the Translator's dispatch table hasn't been extended yet.
+    """

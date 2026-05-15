@@ -13,9 +13,7 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.optional-dependencies]
-smt = ["z3-solver>=4.13"]
 dev = [
-  "z3-solver>=4.13",
   "pytest>=8",
   "pytest-benchmark>=4",
   "hypothesis>=6",

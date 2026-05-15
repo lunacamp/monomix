@@ -31,7 +31,7 @@ All `cargo` commands below should be run from `rust/monomix-kernel/` unless othe
 | Lint | `cargo clippy -- -D warnings` |
 | Format | `cargo fmt` |
 | Build Python bindings (dev loop) | `cd python && maturin develop` |
-| Python tests (Expr, Session, kernel calls, SMT bridge) | `cd python && pytest` |
+| Python tests (Expr, Session, kernel calls, GIL release) | `cd python && pytest` |
 
 The Rust workspace root is at the repo root. Member crates inherit `edition`, `license`, `authors`, and the `unsafe_code = "forbid"` lint from `[workspace.package]` / `[workspace.lints.rust]` in [Cargo.toml](Cargo.toml).
 

@@ -35,9 +35,11 @@ The Python bindings work does not include:
 
 ## Out-of-scope items called out during brainstorming
 
-- Reverse `model → Expr` reconstruction in the SMT bridge (it
-  currently returns raw Python `int` / `Fraction` for numeric values).
-- Additional SMT backends beyond Z3.
+- Reverse `model → Expr` reconstruction in the SMT bridge (`Refuted`
+  and `Sat` return raw Python `int` / `Fraction` / `bool` values).
+- A shipped reference backend. The source has the protocol and
+  Translator only; integrators wire their own backend per
+  `designs/smt.md`.
 - REDUCE-syntax extensions for inequalities / boolean operators (the
   new kernel variants are only reachable via Python constructors).
 
@@ -47,11 +49,3 @@ The Python bindings work does not include:
   check.
 - `__bool__` of non-`Eq` expressions raises. Aligned with NumPy
   convention; documented.
-
-## Pyright suppressions worth revisiting
-
-- `python/monomix/smt/z3_backend.py` carries a file-level
-  `# pyright: reportOptionalMemberAccess=false` because `z3` may be
-  `None` when the package is missing. A cleaner approach is to wrap
-  the import in a small typed shim that asserts non-`None` once at
-  module init, so per-call accesses can be type-checked normally.

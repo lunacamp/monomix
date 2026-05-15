@@ -1,17 +1,27 @@
 """SMT bridge — translate monomix Expr into a backend solver.
 
-Callers above the bridge (the rewrite system, the assumption store, the
-piecewise simplifier) import only from this module. The choice of
-backend is hidden; the only backend shipped today is Z3, used as the
-parity reference for the abstract Backend protocol.
+The package ships the translator and protocol only. No backend is
+included in source; users supply a `Backend` implementation that
+adapts whichever SMT solver they want to drive. See
+[`designs/smt.md`](../../../designs/smt.md) for the protocol contract
+and the feature parity requirements any backend must satisfy.
+
+Typical wiring (illustrative — written in the caller's project):
+
+    from monomix import Session
+    from monomix.smt import Translator, Proved
+    from my_pkg.my_backend import MyTermBuilder, MySolver
+
+    s = Session()
+    x = s.symbol("x")
+    backend = MyTermBuilder()
+    translator = Translator(backend, s)
+    solver = MySolver()
+    solver.add(backend.not_(translator.to_backend(x * x >= s.integer(0))))
+    result = Proved() if solver.check_is_unsat() else ...
 """
 
 from __future__ import annotations
-
-from contextlib import contextmanager
-from typing import Iterator
-
-from monomix import Session
 
 from .errors import (
     BackendUnavailable,
@@ -19,7 +29,7 @@ from .errors import (
     TranslationError,
     Unsupported,
 )
-from .z3_backend import (
+from .results import (
     DecideResult,
     ProveResult,
     Proved,
@@ -27,12 +37,12 @@ from .z3_backend import (
     Sat,
     Unknown,
     Unsat,
-    Z3Backend,
 )
+from .translate import Backend, Translator
 
 __all__ = [
-    "open_session",
-    "Z3Backend",
+    "Backend",
+    "Translator",
     "Proved",
     "Refuted",
     "Unknown",
@@ -45,20 +55,3 @@ __all__ = [
     "TranslationError",
     "Unsupported",
 ]
-
-
-@contextmanager
-def open_session(
-    monomix_session: Session,
-    *,
-    default_timeout_ms: int = 5000,
-) -> Iterator[Z3Backend]:
-    """Open an SMT session bound to a monomix Session.
-
-    The SMT session reads sort declarations from `monomix_session`.
-    """
-    backend = Z3Backend(monomix_session, default_timeout_ms=default_timeout_ms)
-    try:
-        yield backend
-    finally:
-        pass

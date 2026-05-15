@@ -73,23 +73,33 @@ sessions can be simplified in parallel from two Python threads.
 
 ## SMT bridge
 
-`monomix.smt` translates `Expr` into a backend solver (Z3 today). Sort
-declarations on the `Session` flow through:
+`monomix.smt` ships the *protocol* for translating `Expr` into a
+backend solver, but **no backend is included**. Supply your own
+`Backend` implementation — typically a thin adapter around an
+external SMT solver — and wire it through `Translator`. Sort
+declarations on the `Session` flow into the Translator automatically:
 
 ```python
 from monomix import Session
-from monomix.smt import open_session, Proved
+from monomix.smt import Translator, Proved
 
 s = Session()
 s.declare("n", "int")
 n = s.symbol("n")
-with open_session(s) as smt:
-    result = smt.prove((n + n) == (s.integer(2) * n))
-    assert isinstance(result, Proved)
+
+backend = MyBackend()                      # implements Backend protocol
+translator = Translator(backend, s)
+
+claim = (n + n) == (s.integer(2) * n)
+solver = MySolver()                        # your wrapper around the SMT solver
+solver.add(backend.not_(translator.to_backend(claim)))
+result = Proved() if solver.check_is_unsat() else ...
 ```
 
-The bridge is backend-agnostic in name and design: the `Backend`
-protocol in `monomix.smt.translate` is the integration point.
+The result types — `Proved`, `Refuted(counterexample)`, `Sat(model)`,
+`Unsat`, `Unknown` — are solver-agnostic. The protocol and the
+feature requirements any conforming backend must implement are
+documented in [`../designs/smt.md`](../designs/smt.md).
 
 ## Errors
 

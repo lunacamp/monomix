@@ -4,8 +4,9 @@ The translator walks a kernel ExprNode tree via the Expr inspection
 API (`expr.kind`, `expr.children()`, `expr.as_int()`, etc.) and emits
 backend-specific terms via a small Backend protocol.
 
-Z3 is the current backend and the parity reference; the protocol is
-the integration point for any future backend.
+No backend is shipped in this package; users provide an adapter that
+implements the `Backend` protocol. See `designs/smt.md` for the
+parity contract every backend must satisfy.
 """
 
 from __future__ import annotations
