@@ -41,6 +41,18 @@ class Session:
     def parse(self, source: str) -> Expr:
         return self._handle.parse(source)
 
+    # -- SMT sort declarations --------------------------------------------
+
+    def declare(self, name: str, sort: Sort) -> None:
+        if sort not in ("real", "int", "bool"):
+            raise ValueError(
+                f"sort must be 'real', 'int', or 'bool'; got {sort!r}"
+            )
+        self._sorts[name] = sort
+
+    def sort_of(self, name: str) -> Sort:
+        return self._sorts.get(name, "real")
+
     # -- context manager ---------------------------------------------------
 
     def __enter__(self) -> Self:

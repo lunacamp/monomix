@@ -46,3 +46,28 @@ def test_parse_basic():
     s = Session()
     e = s.parse("x + 1")
     assert e.kind == "Add"
+
+
+def test_declare_sort():
+    import pytest
+    s = Session()
+    s.declare("n", "int")
+    assert s.sort_of("n") == "int"
+
+
+def test_declare_default_real():
+    s = Session()
+    assert s.sort_of("x") == "real"
+
+
+def test_declare_invalid_sort_raises():
+    import pytest
+    s = Session()
+    with pytest.raises(ValueError):
+        s.declare("x", "complex")  # not a Sort literal
+
+
+def test_declare_with_explicit_real():
+    s = Session()
+    s.declare("y", "real")
+    assert s.sort_of("y") == "real"
