@@ -11,7 +11,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator
 
-from .errors import BackendUnavailable, SolverError, TranslationError, Unsupported
+from monomix import Session
+
+from .errors import (
+    BackendUnavailable,
+    SolverError,
+    TranslationError,
+    Unsupported,
+)
 from .z3_backend import (
     DecideResult,
     ProveResult,
@@ -41,18 +48,17 @@ __all__ = [
 
 
 @contextmanager
-def open_session(*, default_timeout_ms: int = 5000) -> Iterator[Z3Backend]:
-    """Open a solver session.
+def open_session(
+    monomix_session: Session,
+    *,
+    default_timeout_ms: int = 5000,
+) -> Iterator[Z3Backend]:
+    """Open an SMT session bound to a monomix Session.
 
-    The session owns its own Z3 solver instance and translator. Symbols
-    declared inside the session keep their identity for the duration.
-    Use `push() / pop()` for nested assumption scopes.
+    The SMT session reads sort declarations from `monomix_session`.
     """
-    backend = Z3Backend(default_timeout_ms=default_timeout_ms)
+    backend = Z3Backend(monomix_session, default_timeout_ms=default_timeout_ms)
     try:
         yield backend
     finally:
-        # Z3 cleans up its own native resources when the Python object
-        # is collected; nothing to do here today, but the contextmanager
-        # gives us a place to add tracing / metrics later.
         pass

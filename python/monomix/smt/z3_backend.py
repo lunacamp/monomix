@@ -1,90 +1,178 @@
-"""Z3 backend behind the public solver facade.
+"""Z3 backend for the SMT bridge.
 
-Exposes the four verbs documented in ADR-0003:
+Implements the Backend protocol from `translate.py` and provides the
+session interface (push/pop/assume/decide/prove/declared_symbols).
 
-    assume(constraints) -> SolverContext   (incremental, push/pop)
-    prove(theorem, assumptions=...)        -> Proved | Refuted | Unknown
-    decide(formula, assumptions=...)       -> Sat(model) | Unsat | Unknown
-    simplify(expr, assumptions=...)        -> expr
-
-`Unknown` is a first-class return value — callers (the CAS kernel) decide
-whether to fall back to algebraic methods. We never raise on solver
-indeterminacy.
+Z3 is the parity reference for what the bridge must support; other
+backends would plug into the same Backend protocol.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fractions import Fraction
-from typing import Iterable, List, Mapping, Optional, Union
+from typing import Any
 
-from ..expr import Expr, Symbol
+from monomix import Expr, Session as MonomixSession
+
 from .errors import BackendUnavailable
 from .translate import Translator
 
 try:
     import z3  # type: ignore
-except ImportError:  # pragma: no cover
-    z3 = None  # noqa: N816
+except ImportError as e:
+    z3 = None  # type: ignore[assignment]
+    _IMPORT_ERROR: ImportError | None = e
+else:
+    _IMPORT_ERROR = None
+
+
+def _require_z3():
+    if z3 is None:
+        raise BackendUnavailable(
+            "z3-solver is not installed. Install with `pip install z3-solver`."
+        ) from _IMPORT_ERROR
 
 
 # ----------------------------------------------------------------------
 # Result types
 # ----------------------------------------------------------------------
 
-
-@dataclass(frozen=True)
-class Proved:
-    pass
+@dataclass
+class Proved: ...
 
 
-@dataclass(frozen=True)
+@dataclass
 class Refuted:
-    counterexample: Mapping[str, Union[Fraction, int, bool]]
+    counterexample: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class Unknown:
-    reason: str = ""
-
-
-@dataclass(frozen=True)
+@dataclass
 class Sat:
-    model: Mapping[str, Union[Fraction, int, bool]]
+    model: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class Unsat:
-    pass
+@dataclass
+class Unsat: ...
 
 
-ProveResult = Union[Proved, Refuted, Unknown]
-DecideResult = Union[Sat, Unsat, Unknown]
+@dataclass
+class Unknown: ...
+
+
+ProveResult = Proved | Refuted | Unknown
+DecideResult = Sat | Unsat | Unknown
 
 
 # ----------------------------------------------------------------------
-# Backend
+# Term builder implementing the Backend protocol
 # ----------------------------------------------------------------------
 
+class Z3TermBuilder:
+    def real(self, name: str) -> Any:
+        return z3.Real(name)
+
+    def int(self, name: str) -> Any:
+        return z3.Int(name)
+
+    def bool(self, name: str) -> Any:
+        return z3.Bool(name)
+
+    def rational_const(self, num: int, den: int) -> Any:
+        if den == 1:
+            return z3.RealVal(num)
+        return z3.Q(num, den)
+
+    def int_const(self, n: int) -> Any:
+        return z3.IntVal(n)
+
+    def bool_const(self, b: bool) -> Any:
+        return z3.BoolVal(b)
+
+    def add(self, *xs: Any) -> Any:
+        if not xs:
+            return z3.RealVal(0)
+        out = xs[0]
+        for x in xs[1:]:
+            out = out + x
+        return out
+
+    def mul(self, *xs: Any) -> Any:
+        if not xs:
+            return z3.RealVal(1)
+        out = xs[0]
+        for x in xs[1:]:
+            out = out * x
+        return out
+
+    def neg(self, x: Any) -> Any:
+        return -x
+
+    def div(self, a: Any, b: Any) -> Any:
+        return a / b
+
+    def pow_int(self, base: Any, n: int) -> Any:
+        if n == 0:
+            return z3.RealVal(1)
+        if n < 0:
+            return z3.RealVal(1) / self.pow_int(base, -n)
+        out = base
+        for _ in range(n - 1):
+            out = out * base
+        return out
+
+    def eq(self, a: Any, b: Any) -> Any:
+        return a == b
+
+    def lt(self, a: Any, b: Any) -> Any:
+        return a < b
+
+    def le(self, a: Any, b: Any) -> Any:
+        return a <= b
+
+    def gt(self, a: Any, b: Any) -> Any:
+        return a > b
+
+    def ge(self, a: Any, b: Any) -> Any:
+        return a >= b
+
+    def and_(self, *xs: Any) -> Any:
+        return z3.And(*xs) if xs else z3.BoolVal(True)
+
+    def or_(self, *xs: Any) -> Any:
+        return z3.Or(*xs) if xs else z3.BoolVal(False)
+
+    def not_(self, x: Any) -> Any:
+        return z3.Not(x)
+
+    def implies(self, a: Any, b: Any) -> Any:
+        return z3.Implies(a, b)
+
+    def uninterpreted(self, name: str, args: list[Any]) -> Any:
+        domain = [z3.RealSort()] * len(args)
+        decl = z3.Function(name, *domain, z3.RealSort())
+        return decl(*args)
+
+
+# ----------------------------------------------------------------------
+# Solver session
+# ----------------------------------------------------------------------
 
 class Z3Backend:
-    """A long-lived Z3 session.
-
-    Holds a single `Translator` so symbols stay identified across calls,
-    and a single `z3.Solver` we drive incrementally. This is the object
-    the CAS kernel keeps around between rewrite steps.
-    """
-
-    def __init__(self, *, default_timeout_ms: int = 5000) -> None:
-        if z3 is None:
-            raise BackendUnavailable(
-                "z3-solver is not installed. Install with `pip install z3-solver`."
-            )
-        self._t = Translator()
+    def __init__(
+        self,
+        session: MonomixSession,
+        *,
+        default_timeout_ms: int = 5000,
+    ) -> None:
+        _require_z3()
+        self._monomix_session = session
         self._solver = z3.Solver()
-        self._default_timeout_ms = default_timeout_ms
+        self._solver.set("timeout", default_timeout_ms)
+        self._builder = Z3TermBuilder()
+        self._translator = Translator(self._builder, session)
 
-    # -- incremental assumption stack ----------------------------------
+    def assume(self, e: Expr) -> None:
+        self._solver.add(self._translator.to_backend(e))
 
     def push(self) -> None:
         self._solver.push()
@@ -92,120 +180,55 @@ class Z3Backend:
     def pop(self) -> None:
         self._solver.pop()
 
-    def assume(self, constraint: Expr) -> None:
-        self._solver.add(self._t.to_z3(constraint))
+    def declared_symbols(self) -> list[str]:
+        return [name for (name, _sort) in self._translator._symbols.keys()]
 
-    def assume_all(self, constraints: Iterable[Expr]) -> None:
-        for c in constraints:
-            self.assume(c)
-
-    # -- queries -------------------------------------------------------
-
-    def decide(
-        self,
-        formula: Expr,
-        *,
-        assumptions: Optional[Iterable[Expr]] = None,
-        timeout_ms: Optional[int] = None,
-    ) -> DecideResult:
-        """Is `formula` satisfiable under (current stack + assumptions)?"""
-        with _scoped(self._solver, timeout_ms or self._default_timeout_ms):
-            self._solver.push()
-            try:
-                if assumptions:
-                    for a in assumptions:
-                        self._solver.add(self._t.to_z3(a))
-                self._solver.add(self._t.to_z3(formula))
-                r = self._solver.check()
-                if r == z3.sat:
-                    return Sat(_extract_model(self._solver.model()))
-                if r == z3.unsat:
-                    return Unsat()
-                return Unknown(reason=str(self._solver.reason_unknown()))
-            finally:
-                self._solver.pop()
+    def decide(self, formula: Expr) -> DecideResult:
+        self._solver.push()
+        try:
+            self._solver.add(self._translator.to_backend(formula))
+            r = self._solver.check()
+            if r == z3.sat:
+                return Sat(model=_extract_model(self._solver.model()))
+            if r == z3.unsat:
+                return Unsat()
+            return Unknown()
+        finally:
+            self._solver.pop()
 
     def prove(
         self,
-        theorem: Expr,
+        claim: Expr,
         *,
-        assumptions: Optional[Iterable[Expr]] = None,
-        timeout_ms: Optional[int] = None,
+        assumptions: list[Expr] | None = None,
     ) -> ProveResult:
-        """Does `theorem` hold under (current stack + assumptions)?
-
-        Internally: check satisfiability of `Not(theorem)`. If unsat the
-        theorem is proved; if sat the model is a counterexample.
-        """
-        with _scoped(self._solver, timeout_ms or self._default_timeout_ms):
-            self._solver.push()
-            try:
-                if assumptions:
-                    for a in assumptions:
-                        self._solver.add(self._t.to_z3(a))
-                self._solver.add(z3.Not(self._t.to_z3(theorem)))
-                r = self._solver.check()
-                if r == z3.unsat:
-                    return Proved()
-                if r == z3.sat:
-                    return Refuted(_extract_model(self._solver.model()))
-                return Unknown(reason=str(self._solver.reason_unknown()))
-            finally:
-                self._solver.pop()
-
-    # -- introspection -------------------------------------------------
-
-    def declared_symbols(self) -> List[Symbol]:
-        return [Symbol(name=k[0], sort=k[1]) for k in self._t._symbols]
+        self._solver.push()
+        try:
+            for a in assumptions or []:
+                self._solver.add(self._translator.to_backend(a))
+            self._solver.add(z3.Not(self._translator.to_backend(claim)))
+            r = self._solver.check()
+            if r == z3.unsat:
+                return Proved()
+            if r == z3.sat:
+                return Refuted(counterexample=_extract_model(self._solver.model()))
+            return Unknown()
+        finally:
+            self._solver.pop()
 
 
-# ----------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------
+def _extract_model(model: Any) -> dict[str, Any]:
+    from fractions import Fraction
 
-
-class _scoped:
-    """Temporarily sets `set("timeout", ...)` on the solver."""
-
-    def __init__(self, solver, timeout_ms: int) -> None:
-        self._solver = solver
-        self._timeout_ms = timeout_ms
-        self._previous = None
-
-    def __enter__(self):
-        # Z3's Python API exposes solver.set("timeout", ms). There's no
-        # public getter, so we just always set on entry; Z3 uses the
-        # value for the next check() and we re-set on next call.
-        self._solver.set("timeout", self._timeout_ms)
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def _extract_model(m) -> Mapping[str, Union[Fraction, int, bool]]:
-    out = {}
-    for d in m.decls():
-        v = m[d]
-        out[d.name()] = _z3_value_to_python(v)
+    out: dict[str, Any] = {}
+    for d in model:
+        v = model[d]
+        if z3.is_int_value(v):
+            out[str(d)] = v.as_long()
+        elif z3.is_rational_value(v):
+            out[str(d)] = Fraction(v.numerator_as_long(), v.denominator_as_long())
+        elif z3.is_bool(v):
+            out[str(d)] = bool(v)
+        else:
+            out[str(d)] = v
     return out
-
-
-def _z3_value_to_python(v):
-    if z3.is_int_value(v):
-        return v.as_long()
-    if z3.is_rational_value(v):
-        return Fraction(v.numerator_as_long(), v.denominator_as_long())
-    if z3.is_algebraic_value(v):
-        # Algebraic numbers from nlsat — return a high-precision rational
-        # approximation. Callers wanting exact algebraic numbers should
-        # introspect the model themselves.
-        approx = v.approx(20)
-        return Fraction(
-            approx.numerator_as_long(), approx.denominator_as_long()
-        )
-    if z3.is_true(v):
-        return True
-    if z3.is_false(v):
-        return False
-    return str(v)  # last-resort, e.g. uninterpreted values
