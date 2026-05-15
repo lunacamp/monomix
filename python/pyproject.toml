@@ -1,24 +1,28 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "monomix"
 version = "0.0.1"
 description = "Modern CAS rewrite of REDUCE — Python facade and SMT bridge"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Roman" }]
 license = { text = "MIT" }
 
 dependencies = []
 
 [project.optional-dependencies]
-smt = ["z3-solver>=4.13"]
 dev = [
-  "z3-solver>=4.13",
   "pytest>=8",
+  "pytest-benchmark>=4",
+  "hypothesis>=6",
+  "pyright>=1.1",
+  "ruff>=0.6",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["monomix*"]
+[tool.maturin]
+manifest-path = "../rust/monomix-py/Cargo.toml"
+python-source = "."
+module-name = "monomix._kernel"
+features = ["pyo3/extension-module"]

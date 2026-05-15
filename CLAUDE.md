@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project shape
 
-Monomix is a modern computer algebra system inspired by REDUCE. The architecture is "Python on the surface, Rust underneath" — the user-facing API is Python via PyO3 + maturin, while the symbolic engine is a pure Rust kernel. As of now, the only active code is:
+Monomix is a modern computer algebra system inspired by REDUCE. The architecture is "Python on the surface, Rust underneath" — the user-facing API is Python via PyO3 + maturin, while the symbolic engine is a pure Rust kernel. The active code is split across:
 
-- `rust/monomix-kernel/` — Phase 1 (MVP) symbolic kernel. This is where almost all current work happens.
-- `python/` — a thin Python package that today only ships a Z3 SMT bridge (placeholder; the Rust-backed `monomix.Expr` is not yet wired up).
-- `rust/solver-bridge/` — a Phase 2 sketch; **not buildable** yet (Z3 deps commented out). Don't try to build it.
+- `rust/monomix-kernel/` — Phase 1 (MVP) symbolic kernel.
+- `rust/monomix-py/` — PyO3 binding crate exposing the kernel to Python.
+- `python/monomix/` — Python package. Provides `monomix.Expr` (Rust-backed handle), `monomix.Session`, module-level kernel functions (`simplify`, `df`, `expand`, `solve`, `sub`, `evaluate_numeric`), and the SMT bridge under `monomix.smt`.
+- `rust/solver-bridge/` — Phase 2 sketch; **not buildable** yet (Z3 deps commented out). Don't try to build it.
 
 Authoritative scope and phasing live in [SCOPE.md](SCOPE.md). Architectural decisions are in [decisions/](decisions/) (ADRs); design notes per subsystem are in [designs/](designs/). When deciding whether a feature belongs in this phase, consult SCOPE.md first — it explicitly enumerates what's in / out / deferred for each phase.
 
@@ -29,7 +30,8 @@ All `cargo` commands below should be run from `rust/monomix-kernel/` unless othe
 | Fuzz a target | `cd fuzz && cargo fuzz run fuzz_parser` (also `fuzz_simplify`, `fuzz_diff`) |
 | Lint | `cargo clippy -- -D warnings` |
 | Format | `cargo fmt` |
-| Python tests (SMT bridge only today) | `cd python && pip install -e .[dev] && pytest` |
+| Build Python bindings (dev loop) | `cd python && maturin develop` |
+| Python tests (Expr, Session, kernel calls, GIL release) | `cd python && pytest` |
 
 The Rust workspace root is at the repo root. Member crates inherit `edition`, `license`, `authors`, and the `unsafe_code = "forbid"` lint from `[workspace.package]` / `[workspace.lints.rust]` in [Cargo.toml](Cargo.toml).
 

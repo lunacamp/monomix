@@ -69,5 +69,17 @@ fn diff_inner(
         }
 
         ExprNode::List(_) | ExprNode::String(_) => Ok(pool.zero),
+
+        ExprNode::Lt(_, _)
+        | ExprNode::Le(_, _)
+        | ExprNode::Gt(_, _)
+        | ExprNode::Ge(_, _)
+        | ExprNode::Not(_)
+        | ExprNode::And(_)
+        | ExprNode::Or(_)
+        | ExprNode::Implies(_, _)
+        | ExprNode::BoolConst(_) => Err(KernelError::UnsupportedEquation {
+            reason: "boolean/comparison expressions are not differentiable".to_string(),
+        }),
     }
 }

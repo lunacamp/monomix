@@ -199,6 +199,14 @@ mod tests {
     }
 
     #[test]
+    fn evalnum_bool_const_is_unsupported() {
+        let mut pool = ExprPool::new();
+        let t = pool.bool_const(true);
+        let result = evaluate_numeric(&pool, &[], t);
+        assert!(matches!(result, Err(KernelError::UnsupportedFn)));
+    }
+
+    #[test]
     fn eval_nan_errors() {
         let mut pool = ExprPool::new();
         let _x = pool.symbol("x");
