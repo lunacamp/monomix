@@ -123,3 +123,23 @@ def test_ge(x, y):
 def test_lt_bool_raises(x, y):
     with pytest.raises(TypeError):
         bool(x < y)
+
+
+def test_and(x, y):
+    a = (x == 0)
+    b = (y == 0)
+    e = a & b
+    assert e.kind == "And"
+
+
+def test_or(x, y):
+    a = (x == 0)
+    b = (y == 0)
+    e = a | b
+    assert e.kind == "Or"
+
+
+def test_invert_eq(x):
+    a = (x == 0)
+    e = ~a
+    assert e.kind == "Not"

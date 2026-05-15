@@ -251,6 +251,40 @@ impl Expr {
         let id = pool.ge(self.id, rhs.id);
         Ok(Expr::new(Arc::clone(&self.pool), id))
     }
+
+    fn __and__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.and_(vec![self.id, rhs.id]);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __rand__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let lhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.and_(vec![lhs.id, self.id]);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __or__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.or_(vec![self.id, rhs.id]);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __ror__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let lhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.or_(vec![lhs.id, self.id]);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __invert__(&self) -> Expr {
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.not_node(self.id);
+        Expr::new(Arc::clone(&self.pool), id)
+    }
 }
 
 fn render_node(pool: &ExprPool, id: ExprId) -> String {
