@@ -1,19 +1,9 @@
-"""Public solver facade.
+"""SMT bridge — translate monomix Expr into a backend solver.
 
 Callers above the bridge (the rewrite system, the assumption store, the
 piecewise simplifier) import only from this module. The choice of
-backend (currently always Z3) is hidden.
-
-Typical usage:
-
-    from monomix.expr import Symbol, Rational, lt, gt, and_, mul, pow_
-    from monomix.solver import open_session
-
-    x = Symbol("x", "real")
-    with open_session() as s:
-        s.assume(gt(x, Rational.of(0)))
-        result = s.prove(gt(mul(x, x), Rational.of(0)))
-        # result is Proved()
+backend is hidden; the only backend shipped today is Z3, used as the
+parity reference for the abstract Backend protocol.
 """
 
 from __future__ import annotations
