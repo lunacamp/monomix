@@ -1,8 +1,25 @@
-"""Monomix — modern CAS rewrite of REDUCE.
+"""Monomix — modern CAS rewrite of REDUCE."""
 
-This package is the Python-side facade. The numerical/symbolic hot path
-will eventually live in a Rust kernel; for now we host a minimal
-expression IR here so the SMT bridge has something to translate from.
-"""
+from __future__ import annotations
+
+from monomix._kernel import Expr
+from monomix.errors import (
+    CrossSessionError,
+    EvalError,
+    MonomixError,
+    ParseError,
+    UnsupportedError,
+)
+from monomix.session import Session
 
 __version__ = "0.0.1"
+
+__all__ = [
+    "Expr",
+    "Session",
+    "MonomixError",
+    "ParseError",
+    "EvalError",
+    "UnsupportedError",
+    "CrossSessionError",
+]
