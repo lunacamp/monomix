@@ -17,5 +17,6 @@ fn _kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<session::SessionHandle>()?;
     m.add_class::<expr::Expr>()?;
     m.add_function(wrap_pyfunction!(kernel_fns::simplify, m)?)?;
+    m.add_function(wrap_pyfunction!(kernel_fns::df, m)?)?;
     Ok(())
 }

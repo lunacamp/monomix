@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from monomix._kernel import Expr, simplify
+from monomix._kernel import Expr, df, simplify
 from monomix.errors import (
     CrossSessionError,
     EvalError,
@@ -17,6 +17,7 @@ __version__ = "0.0.1"
 __all__ = [
     "Expr",
     "Session",
+    "df",
     "simplify",
     "MonomixError",
     "ParseError",
