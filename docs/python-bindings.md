@@ -73,6 +73,11 @@ sessions can be simplified in parallel from two Python threads.
 
 ## SMT bridge
 
+> **TODO: reevaluate SMT bridge.** The current shape — protocol only,
+> no shipped backend — was chosen during the Phase 7 rewrite. Revisit
+> the trade-offs (ship a reference backend? keep protocol-only?
+> separate package?) before locking the public API.
+
 `monomix.smt` ships the *protocol* for translating `Expr` into a
 backend solver, but **no backend is included**. Supply your own
 `Backend` implementation — typically a thin adapter around an
