@@ -95,3 +95,13 @@ def test_bindings_returns_copy():
     d["a"] = s.symbol("z")  # mutating the returned dict
     # must not affect the session
     assert s.bindings()["a"].is_same(x)
+
+
+def test_parse_resolves_bindings():
+    from monomix import simplify
+    s = Session()
+    x = s.symbol("x")
+    s.assign("a", x + s.integer(1))
+    result = s.parse("a + 1")
+    expected = x + s.integer(2)
+    assert simplify(result).is_same(simplify(expected))

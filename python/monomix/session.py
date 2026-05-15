@@ -39,7 +39,12 @@ class Session:
         return self._handle.rational(p, q)
 
     def parse(self, source: str) -> Expr:
-        return self._handle.parse(source)
+        parsed = self._handle.parse(source)
+        if not self._bindings:
+            return parsed
+        from monomix._kernel import sub
+        mapping = {self.symbol(name): value for name, value in self._bindings.items()}
+        return sub(mapping, parsed)
 
     # -- SMT sort declarations --------------------------------------------
 
