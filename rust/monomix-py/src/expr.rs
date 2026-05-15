@@ -223,6 +223,34 @@ impl Expr {
     fn __hash__(&self) -> u64 {
         self.id.0 as u64
     }
+
+    fn __lt__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.lt(self.id, rhs.id);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __le__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.le(self.id, rhs.id);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __gt__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.gt(self.id, rhs.id);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __ge__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.ge(self.id, rhs.id);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
 }
 
 fn render_node(pool: &ExprPool, id: ExprId) -> String {

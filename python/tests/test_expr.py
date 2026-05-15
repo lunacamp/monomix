@@ -102,3 +102,24 @@ def test_dict_key(x, s):
 def test_eq_with_int_literal(x):
     e = x == 0
     assert e.kind == "Eq"
+
+
+def test_lt(x, y):
+    assert (x < y).kind == "Lt"
+
+
+def test_le(x, y):
+    assert (x <= y).kind == "Le"
+
+
+def test_gt(x, y):
+    assert (x > y).kind == "Gt"
+
+
+def test_ge(x, y):
+    assert (x >= y).kind == "Ge"
+
+
+def test_lt_bool_raises(x, y):
+    with pytest.raises(TypeError):
+        bool(x < y)
