@@ -285,6 +285,77 @@ impl Expr {
         let id = pool.not_node(self.id);
         Expr::new(Arc::clone(&self.pool), id)
     }
+
+    fn as_int(&self) -> Option<BigInt> {
+        let pool = self.pool.lock().expect("pool mutex poisoned");
+        match pool.get(self.id) {
+            ExprNode::SmallInt(n) => Some(BigInt::from(*n)),
+            ExprNode::BigInt(b) => Some((**b).clone()),
+            _ => None,
+        }
+    }
+
+    fn as_rational(&self) -> Option<(BigInt, BigInt)> {
+        let pool = self.pool.lock().expect("pool mutex poisoned");
+        match pool.get(self.id) {
+            ExprNode::Rational(r) => Some((r.0.clone(), r.1.clone())),
+            ExprNode::SmallInt(n) => Some((BigInt::from(*n), BigInt::from(1))),
+            ExprNode::BigInt(b) => Some(((**b).clone(), BigInt::from(1))),
+            _ => None,
+        }
+    }
+
+    fn as_float(&self) -> Option<f64> {
+        let pool = self.pool.lock().expect("pool mutex poisoned");
+        match pool.get(self.id) {
+            ExprNode::Float(f) => Some(f.into_inner()),
+            _ => None,
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        let pool = self.pool.lock().expect("pool mutex poisoned");
+        match pool.get(self.id) {
+            ExprNode::BoolConst(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    fn symbol_name(&self) -> Option<String> {
+        let pool = self.pool.lock().expect("pool mutex poisoned");
+        match pool.get(self.id) {
+            ExprNode::Symbol(s) => Some(pool.str_of(*s).to_string()),
+            _ => None,
+        }
+    }
+
+    fn fn_name(&self) -> Option<String> {
+        let pool = self.pool.lock().expect("pool mutex poisoned");
+        match pool.get(self.id) {
+            ExprNode::Fn(tag, _) => Some(match tag {
+                monomix_kernel::FnTag::Sin => "sin".to_string(),
+                monomix_kernel::FnTag::Cos => "cos".to_string(),
+                monomix_kernel::FnTag::Tan => "tan".to_string(),
+                monomix_kernel::FnTag::Exp => "exp".to_string(),
+                monomix_kernel::FnTag::Log => "log".to_string(),
+                monomix_kernel::FnTag::Sqrt => "sqrt".to_string(),
+                monomix_kernel::FnTag::Abs => "abs".to_string(),
+                monomix_kernel::FnTag::Asin => "asin".to_string(),
+                monomix_kernel::FnTag::Acos => "acos".to_string(),
+                monomix_kernel::FnTag::Atan => "atan".to_string(),
+                monomix_kernel::FnTag::Custom(s) => pool.str_of(*s).to_string(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn children(&self) -> Vec<Expr> {
+        let pool = self.pool.lock().expect("pool mutex poisoned");
+        pool.children(self.id)
+            .into_iter()
+            .map(|id| Expr::new(Arc::clone(&self.pool), id))
+            .collect()
+    }
 }
 
 fn render_node(pool: &ExprPool, id: ExprId) -> String {

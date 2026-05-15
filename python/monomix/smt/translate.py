@@ -1,220 +1,155 @@
-"""Translate Monomix expression IR <-> Z3 AST.
+"""Translate Monomix Expr (Rust-backed) into backend AST.
 
-The translator is intentionally small. It supports:
+The translator walks a kernel ExprNode tree via the Expr inspection
+API (`expr.kind`, `expr.children()`, `expr.as_int()`, etc.) and emits
+backend-specific terms via a small Backend protocol.
 
-* Symbols with explicit sorts (real / int / bool)
-* Rational constants (exact, never floats)
-* Arithmetic: + - * / neg, integer-exponent power
-* Comparisons: = < <= > >=
-* Boolean: and or not =>
-* Unknown function symbols (e.g. `sin`) are translated as *uninterpreted*
-  functions on real -> real, which is sound but incomplete: Z3 cannot
-  decide formulas involving them, but it also won't lie about them.
-
-Anything else raises `Unsupported` so the caller can fall back to
-algebraic methods. Adding new heads is a matter of editing the dispatch
-table at the bottom of this file.
+Z3 is the current backend and the parity reference; the protocol is
+the integration point for any future backend.
 """
 
 from __future__ import annotations
 
 from fractions import Fraction
-from typing import Callable, Dict
+from typing import Any, Protocol
 
-from ..expr import App, BoolConst, Expr, Rational, Symbol
+from monomix import Expr, Session
+
 from .errors import TranslationError, Unsupported
 
-try:
-    import z3  # type: ignore
-except ImportError as e:  # pragma: no cover - tested via BackendUnavailable
-    z3 = None  # noqa: N816
-    _IMPORT_ERROR = e
-else:
-    _IMPORT_ERROR = None
 
+class Backend(Protocol):
+    """Minimum interface a backend must provide."""
 
-def _require_z3():
-    if z3 is None:
-        from .errors import BackendUnavailable
+    def real(self, name: str) -> Any: ...
+    def int(self, name: str) -> Any: ...
+    def bool(self, name: str) -> Any: ...
+    def rational_const(self, num: int, den: int) -> Any: ...
+    def int_const(self, n: int) -> Any: ...
+    def bool_const(self, b: bool) -> Any: ...
 
-        raise BackendUnavailable(
-            "z3-solver is not installed. Install with `pip install z3-solver`."
-        ) from _IMPORT_ERROR
+    def add(self, *xs: Any) -> Any: ...
+    def mul(self, *xs: Any) -> Any: ...
+    def neg(self, x: Any) -> Any: ...
+    def div(self, a: Any, b: Any) -> Any: ...
+    def pow_int(self, base: Any, n: int) -> Any: ...
+
+    def eq(self, a: Any, b: Any) -> Any: ...
+    def lt(self, a: Any, b: Any) -> Any: ...
+    def le(self, a: Any, b: Any) -> Any: ...
+    def gt(self, a: Any, b: Any) -> Any: ...
+    def ge(self, a: Any, b: Any) -> Any: ...
+
+    def and_(self, *xs: Any) -> Any: ...
+    def or_(self, *xs: Any) -> Any: ...
+    def not_(self, x: Any) -> Any: ...
+    def implies(self, a: Any, b: Any) -> Any: ...
+
+    def uninterpreted(self, name: str, args: list[Any]) -> Any: ...
 
 
 class Translator:
-    """Stateful translator: caches Z3 declarations for symbols/functions.
+    """Stateful translator caching backend declarations per symbol."""
 
-    Reuse a single translator instance across a logical session so that
-    `x` declared once stays the same Z3 constant across many formulas
-    and a `push/pop` scope still refers to the same variables.
-    """
+    def __init__(self, backend: Backend, session: Session) -> None:
+        self.backend = backend
+        self.session = session
+        self._symbols: dict[tuple[str, str], Any] = {}
 
-    def __init__(self) -> None:
-        _require_z3()
-        self._symbols: Dict[tuple, "z3.ExprRef"] = {}
-        self._uninterpreted_funcs: Dict[tuple, "z3.FuncDeclRef"] = {}
+    def to_backend(self, e: Expr) -> Any:
+        kind = e.kind
 
-    # ------------------------------------------------------------------
-    # Symbol / function declaration cache
-    # ------------------------------------------------------------------
+        if kind == "SmallInt" or kind == "BigInt":
+            n = e.as_int()
+            assert n is not None
+            return self.backend.int_const(n)
+        if kind == "Rational":
+            r = e.as_rational()
+            assert r is not None
+            return self.backend.rational_const(r[0], r[1])
+        if kind == "Float":
+            f = e.as_float()
+            assert f is not None
+            frac = Fraction(f).limit_denominator(10**12)
+            return self.backend.rational_const(frac.numerator, frac.denominator)
+        if kind == "Symbol":
+            name = e.symbol_name()
+            assert name is not None
+            return self._declare_symbol(name)
+        if kind == "BoolConst":
+            b = e.as_bool()
+            assert b is not None
+            return self.backend.bool_const(b)
 
-    def _declare_symbol(self, sym: Symbol) -> "z3.ExprRef":
-        key = (sym.name, sym.sort)
+        children = e.children()
+
+        if kind == "Add":
+            return self.backend.add(*[self.to_backend(c) for c in children])
+        if kind == "Mul":
+            return self.backend.mul(*[self.to_backend(c) for c in children])
+        if kind == "Neg":
+            return self.backend.neg(self.to_backend(children[0]))
+        if kind == "Div":
+            return self.backend.div(
+                self.to_backend(children[0]), self.to_backend(children[1])
+            )
+        if kind == "Pow":
+            base, exp = children
+            exp_int = exp.as_int()
+            if exp_int is None:
+                raise Unsupported("non-integer exponents not supported")
+            return self.backend.pow_int(self.to_backend(base), exp_int)
+        if kind == "Eq":
+            return self.backend.eq(
+                self.to_backend(children[0]), self.to_backend(children[1])
+            )
+        if kind == "Lt":
+            return self.backend.lt(
+                self.to_backend(children[0]), self.to_backend(children[1])
+            )
+        if kind == "Le":
+            return self.backend.le(
+                self.to_backend(children[0]), self.to_backend(children[1])
+            )
+        if kind == "Gt":
+            return self.backend.gt(
+                self.to_backend(children[0]), self.to_backend(children[1])
+            )
+        if kind == "Ge":
+            return self.backend.ge(
+                self.to_backend(children[0]), self.to_backend(children[1])
+            )
+        if kind == "And":
+            return self.backend.and_(*[self.to_backend(c) for c in children])
+        if kind == "Or":
+            return self.backend.or_(*[self.to_backend(c) for c in children])
+        if kind == "Not":
+            return self.backend.not_(self.to_backend(children[0]))
+        if kind == "Implies":
+            return self.backend.implies(
+                self.to_backend(children[0]), self.to_backend(children[1])
+            )
+        if kind == "Fn":
+            name = e.fn_name()
+            assert name is not None
+            return self.backend.uninterpreted(
+                name, [self.to_backend(c) for c in children]
+            )
+
+        raise TranslationError(f"unhandled Expr kind: {kind}")
+
+    def _declare_symbol(self, name: str) -> Any:
+        sort = self.session.sort_of(name)
+        key = (name, sort)
         if key in self._symbols:
             return self._symbols[key]
-        if sym.sort == "real":
-            ref = z3.Real(sym.name)
-        elif sym.sort == "int":
-            ref = z3.Int(sym.name)
-        elif sym.sort == "bool":
-            ref = z3.Bool(sym.name)
-        else:  # pragma: no cover - guarded by the Sort literal
-            raise TranslationError(f"unknown sort {sym.sort!r}")
+        if sort == "real":
+            ref = self.backend.real(name)
+        elif sort == "int":
+            ref = self.backend.int(name)
+        elif sort == "bool":
+            ref = self.backend.bool(name)
+        else:
+            raise TranslationError(f"unknown sort {sort!r}")
         self._symbols[key] = ref
         return ref
-
-    def _declare_uninterpreted(self, head: str, arity: int) -> "z3.FuncDeclRef":
-        key = (head, arity)
-        if key in self._uninterpreted_funcs:
-            return self._uninterpreted_funcs[key]
-        domain = [z3.RealSort()] * arity
-        decl = z3.Function(head, *domain, z3.RealSort())
-        self._uninterpreted_funcs[key] = decl
-        return decl
-
-    # ------------------------------------------------------------------
-    # IR -> Z3
-    # ------------------------------------------------------------------
-
-    def to_z3(self, e: Expr) -> "z3.ExprRef":
-        if isinstance(e, Symbol):
-            return self._declare_symbol(e)
-        if isinstance(e, Rational):
-            return _rational_to_z3(e.value)
-        if isinstance(e, BoolConst):
-            return z3.BoolVal(e.value)
-        if isinstance(e, App):
-            return self._app_to_z3(e)
-        raise TranslationError(f"unhandled IR node: {type(e).__name__}")
-
-    def _app_to_z3(self, e: App) -> "z3.ExprRef":
-        handler = _DISPATCH.get(e.head)
-        if handler is not None:
-            return handler(self, e)
-        # Fallback: treat unknown heads as uninterpreted real functions.
-        # Sound but Z3 will report Unknown on most formulas using them.
-        decl = self._declare_uninterpreted(e.head, len(e.args))
-        return decl(*[self.to_z3(a) for a in e.args])
-
-
-def _rational_to_z3(q: Fraction) -> "z3.ExprRef":
-    if q.denominator == 1:
-        return z3.RealVal(q.numerator)
-    return z3.Q(q.numerator, q.denominator)
-
-
-# ----------------------------------------------------------------------
-# Dispatch table for known opcodes
-# ----------------------------------------------------------------------
-
-
-def _h_add(t: Translator, e: App) -> "z3.ExprRef":
-    if not e.args:
-        return z3.RealVal(0)
-    args = [t.to_z3(a) for a in e.args]
-    out = args[0]
-    for a in args[1:]:
-        out = out + a
-    return out
-
-
-def _h_mul(t: Translator, e: App) -> "z3.ExprRef":
-    if not e.args:
-        return z3.RealVal(1)
-    args = [t.to_z3(a) for a in e.args]
-    out = args[0]
-    for a in args[1:]:
-        out = out * a
-    return out
-
-
-def _h_sub(t: Translator, e: App) -> "z3.ExprRef":
-    if len(e.args) != 2:
-        raise TranslationError("'-' expects exactly 2 args (use 'neg' for unary)")
-    return t.to_z3(e.args[0]) - t.to_z3(e.args[1])
-
-
-def _h_neg(t: Translator, e: App) -> "z3.ExprRef":
-    if len(e.args) != 1:
-        raise TranslationError("'neg' expects exactly 1 arg")
-    return -t.to_z3(e.args[0])
-
-
-def _h_pow(t: Translator, e: App) -> "z3.ExprRef":
-    if len(e.args) != 2:
-        raise TranslationError("'^' expects exactly 2 args")
-    base, exp = e.args
-    z3_base = t.to_z3(base)
-    # Z3 supports general real exponents but the nlsat decision procedure
-    # only handles integer exponents. We allow integer-rational exponents
-    # and reject arbitrary symbolic exponents up front.
-    if isinstance(exp, Rational) and exp.value.denominator == 1:
-        n = exp.value.numerator
-        if n == 0:
-            return z3.RealVal(1)
-        if n > 0:
-            out = z3_base
-            for _ in range(n - 1):
-                out = out * z3_base
-            return out
-        # negative integer exponent: 1 / x^|n|
-        return z3.RealVal(1) / _h_pow(t, App("^", (base, Rational(Fraction(-n)))))
-    raise Unsupported(
-        "non-integer or symbolic exponent — outside Z3's nlsat fragment"
-    )
-
-
-def _h_div(t: Translator, e: App) -> "z3.ExprRef":
-    if len(e.args) != 2:
-        raise TranslationError("'/' expects exactly 2 args")
-    return t.to_z3(e.args[0]) / t.to_z3(e.args[1])
-
-
-def _binop(op: Callable):
-    def handler(t: Translator, e: App) -> "z3.ExprRef":
-        if len(e.args) != 2:
-            raise TranslationError(f"binary op expects 2 args, got {len(e.args)}")
-        return op(t.to_z3(e.args[0]), t.to_z3(e.args[1]))
-    return handler
-
-
-def _nary_bool(op):
-    def handler(t: Translator, e: App) -> "z3.ExprRef":
-        return op(*[t.to_z3(a) for a in e.args])
-    return handler
-
-
-def _h_not(t: Translator, e: App) -> "z3.ExprRef":
-    if len(e.args) != 1:
-        raise TranslationError("'not' expects exactly 1 arg")
-    return z3.Not(t.to_z3(e.args[0]))
-
-
-_DISPATCH: Dict[str, Callable[[Translator, App], "z3.ExprRef"]] = {
-    "+": _h_add,
-    "*": _h_mul,
-    "-": _h_sub,
-    "neg": _h_neg,
-    "^": _h_pow,
-    "/": _h_div,
-    "=": _binop(lambda a, b: a == b),
-    "<": _binop(lambda a, b: a < b),
-    "<=": _binop(lambda a, b: a <= b),
-    ">": _binop(lambda a, b: a > b),
-    ">=": _binop(lambda a, b: a >= b),
-    "and": _nary_bool(lambda *xs: z3.And(*xs) if xs else z3.BoolVal(True)),
-    "or": _nary_bool(lambda *xs: z3.Or(*xs) if xs else z3.BoolVal(False)),
-    "not": _h_not,
-    "=>": _binop(lambda a, b: z3.Implies(a, b)),
-}
