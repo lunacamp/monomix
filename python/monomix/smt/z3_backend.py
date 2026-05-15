@@ -6,6 +6,10 @@ session interface (push/pop/assume/decide/prove/declared_symbols).
 Z3 is the parity reference for what the bridge must support; other
 backends would plug into the same Backend protocol.
 """
+# pyright: reportOptionalMemberAccess=false
+# `z3` is None only when the package is missing — every z3.* access is gated by
+# _require_z3() at the top of Z3Backend.__init__, so optional-member checks here
+# would flag code paths that are unreachable in practice.
 
 from __future__ import annotations
 

@@ -64,7 +64,7 @@ def test_declare_invalid_sort_raises():
     import pytest
     s = Session()
     with pytest.raises(ValueError):
-        s.declare("x", "complex")  # not a Sort literal
+        s.declare("x", "complex")  # type: ignore[arg-type]  # deliberate bad sort
 
 
 def test_declare_with_explicit_real():
