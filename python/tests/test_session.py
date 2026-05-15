@@ -71,3 +71,27 @@ def test_declare_with_explicit_real():
     s = Session()
     s.declare("y", "real")
     assert s.sort_of("y") == "real"
+
+
+def test_assign_and_clear():
+    s = Session()
+    x = s.symbol("x")
+    s.assign("a", x)
+    assert "a" in s.bindings()
+    s.clear("a")
+    assert "a" not in s.bindings()
+
+
+def test_clear_missing_is_noop():
+    s = Session()
+    s.clear("nope")  # should not raise
+
+
+def test_bindings_returns_copy():
+    s = Session()
+    x = s.symbol("x")
+    s.assign("a", x)
+    d = s.bindings()
+    d["a"] = s.symbol("z")  # mutating the returned dict
+    # must not affect the session
+    assert s.bindings()["a"].is_same(x)

@@ -53,6 +53,17 @@ class Session:
     def sort_of(self, name: str) -> Sort:
         return self._sorts.get(name, "real")
 
+    # -- Bindings ---------------------------------------------------------
+
+    def assign(self, name: str, value: Expr) -> None:
+        self._bindings[name] = value
+
+    def clear(self, name: str) -> None:
+        self._bindings.pop(name, None)
+
+    def bindings(self) -> dict[str, Expr]:
+        return dict(self._bindings)
+
     # -- context manager ---------------------------------------------------
 
     def __enter__(self) -> Self:
