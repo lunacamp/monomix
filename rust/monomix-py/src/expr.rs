@@ -185,6 +185,44 @@ impl Expr {
     fn __pos__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let id = pool.eq_node(self.id, rhs.id);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __ne__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        let rhs = coerce_to_expr(other, &self.pool)?;
+        let mut pool = self.pool.lock().expect("pool mutex poisoned");
+        let eq = pool.eq_node(self.id, rhs.id);
+        let id = pool.not_node(eq);
+        Ok(Expr::new(Arc::clone(&self.pool), id))
+    }
+
+    fn __bool__(&self) -> PyResult<bool> {
+        let pool = self.pool.lock().expect("pool mutex poisoned");
+        match pool.get(self.id) {
+            ExprNode::Eq(a, b) => Ok(a == b),
+            ExprNode::Not(inner) => match pool.get(*inner) {
+                ExprNode::Eq(a, b) => Ok(a != b),
+                _ => Err(pyo3::exceptions::PyTypeError::new_err(
+                    "ambiguous truth value of symbolic expression — \
+                     use is_same() or evaluate first",
+                )),
+            },
+            ExprNode::BoolConst(b) => Ok(*b),
+            _ => Err(pyo3::exceptions::PyTypeError::new_err(
+                "ambiguous truth value of symbolic expression — \
+                 use is_same() or evaluate first",
+            )),
+        }
+    }
+
+    fn __hash__(&self) -> u64 {
+        self.id.0 as u64
+    }
 }
 
 fn render_node(pool: &ExprPool, id: ExprId) -> String {

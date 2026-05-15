@@ -57,3 +57,48 @@ def test_literal_coercion_radd(x):
 
 def test_literal_coercion_mul(x):
     assert (2 * x).kind == "Mul"
+
+
+def test_eq_builds_eq_node(x, y):
+    e = x == y
+    assert e.kind == "Eq"
+
+
+def test_eq_self_is_true(x):
+    assert bool(x == x) is True
+
+
+def test_eq_different_symbols_is_false(x, y):
+    assert bool(x == y) is False
+
+
+def test_ne_builds_not_eq(x, y):
+    e = x != y
+    assert e.kind == "Not"
+
+
+def test_bool_of_non_eq_raises(x, y):
+    e = x + y
+    with pytest.raises(TypeError):
+        bool(e)
+
+
+def test_hash_consistency(x, s):
+    x2 = s.symbol("x")
+    assert hash(x) == hash(x2)
+    assert bool(x == x2)
+
+
+def test_hash_differs_for_distinct(x, y):
+    assert hash(x) != hash(y)
+
+
+def test_dict_key(x, s):
+    x2 = s.symbol("x")
+    d = {x: "value"}
+    assert d[x2] == "value"
+
+
+def test_eq_with_int_literal(x):
+    e = x == 0
+    assert e.kind == "Eq"
