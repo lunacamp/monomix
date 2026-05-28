@@ -8,8 +8,7 @@ Monomix is a modern computer algebra system inspired by REDUCE. The architecture
 
 - `rust/monomix-kernel/` — Phase 1 (MVP) symbolic kernel.
 - `rust/monomix-py/` — PyO3 binding crate exposing the kernel to Python.
-- `python/monomix/` — Python package. Provides `monomix.Expr` (Rust-backed handle), `monomix.Session`, module-level kernel functions (`simplify`, `df`, `expand`, `solve`, `sub`, `evaluate_numeric`), and the SMT bridge under `monomix.smt`.
-- `rust/solver-bridge/` — Phase 2 sketch; **not buildable** yet (Z3 deps commented out). Don't try to build it.
+- `python/monomix/` — Python package. Provides `monomix.Expr` (Rust-backed handle), `monomix.Session`, and module-level kernel functions (`simplify`, `df`, `expand`, `solve`, `sub`, `evaluate_numeric`).
 
 Authoritative scope and phasing live in [SCOPE.md](SCOPE.md). Architectural decisions are in [decisions/](decisions/) (ADRs); design notes per subsystem are in [designs/](designs/). When deciding whether a feature belongs in this phase, consult SCOPE.md first — it explicitly enumerates what's in / out / deferred for each phase.
 

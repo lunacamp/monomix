@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "monomix"
 version = "0.0.1"
-description = "Modern CAS rewrite of REDUCE — Python facade and SMT bridge"
+description = "Modern CAS rewrite of REDUCE — Python facade over the Rust kernel"
 requires-python = ">=3.11"
 authors = [{ name = "Roman" }]
 license = { text = "MIT" }

@@ -71,41 +71,6 @@ good = (a == b) & (c == d)  # what you wanted
 All kernel calls release the GIL while the Rust side runs, so two
 sessions can be simplified in parallel from two Python threads.
 
-## SMT bridge
-
-> **TODO: reevaluate SMT bridge.** The current shape — protocol only,
-> no shipped backend — was chosen during the Phase 7 rewrite. Revisit
-> the trade-offs (ship a reference backend? keep protocol-only?
-> separate package?) before locking the public API.
-
-`monomix.smt` ships the *protocol* for translating `Expr` into a
-backend solver, but **no backend is included**. Supply your own
-`Backend` implementation — typically a thin adapter around an
-external SMT solver — and wire it through `Translator`. Sort
-declarations on the `Session` flow into the Translator automatically:
-
-```python
-from monomix import Session
-from monomix.smt import Translator, Proved
-
-s = Session()
-s.declare("n", "int")
-n = s.symbol("n")
-
-backend = MyBackend()                      # implements Backend protocol
-translator = Translator(backend, s)
-
-claim = (n + n) == (s.integer(2) * n)
-solver = MySolver()                        # your wrapper around the SMT solver
-solver.add(backend.not_(translator.to_backend(claim)))
-result = Proved() if solver.check_is_unsat() else ...
-```
-
-The result types — `Proved`, `Refuted(counterexample)`, `Sat(model)`,
-`Unsat`, `Unknown` — are solver-agnostic. The protocol and the
-feature requirements any conforming backend must implement are
-documented in [`../designs/smt.md`](../designs/smt.md).
-
 ## Errors
 
 | Exception | When |

@@ -1,9 +1,17 @@
 # ADR 0003 — Z3 as the SMT backend for Monomix
 
-- Status: Accepted
+- Status: Superseded by [ADR-0004](0004-native-decision-procedures.md) (2026-05-27)
 - Date: 2026-05-03
 - Deciders: Roman (solo maintainer)
 - Depends on: ADR-0001 (implementation language), ADR-0002 (high-level architecture)
+
+> **Superseded by [ADR-0004](0004-native-decision-procedures.md).** Monomix
+> will implement decision procedures natively in the Rust kernel rather than
+> adopting an external SMT solver. The decision recorded below — adopt Z3 via
+> `monomix.solver`, with a `rust/solver-bridge` crate — is kept for the
+> historical record only. The `monomix.smt` bridge and the `rust/solver-bridge`
+> crate it motivated have been removed. See ADR-0004 for the reversal and its
+> rationale.
 
 ## Context
 

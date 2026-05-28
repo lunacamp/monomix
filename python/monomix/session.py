@@ -1,7 +1,7 @@
 """Python-side Session: holds a kernel _SessionHandle plus Python-only state.
 
 The Session owns the ExprPool (indirectly via _SessionHandle). All
-mutable state — variable bindings, SMT sort declarations — lives in
+mutable state — variable bindings, symbol sort declarations — lives in
 the Python class; the kernel itself stays stateless.
 """
 
@@ -46,7 +46,7 @@ class Session:
         mapping = {self.symbol(name): value for name, value in self._bindings.items()}
         return sub(mapping, parsed)
 
-    # -- SMT sort declarations --------------------------------------------
+    # -- Symbol sort declarations -----------------------------------------
 
     def declare(self, name: str, sort: Sort) -> None:
         if sort not in ("real", "int", "bool"):
