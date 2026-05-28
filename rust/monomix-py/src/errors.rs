@@ -13,8 +13,8 @@ pub fn map_kernel_error(err: KernelError) -> PyErr {
     match err {
         KernelError::Parse(diags) => {
             let msg = diags
-                .iter()
-                .map(|d| format!("{:?}", d))
+                .into_iter()
+                .map(|d| d.message)
                 .collect::<Vec<_>>()
                 .join("; ");
             PyErr::new::<ParseError, _>(msg)

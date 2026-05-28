@@ -44,29 +44,28 @@ impl SessionHandle {
 
     fn parse(&self, py: Python<'_>, source: &str) -> PyResult<Expr> {
         let pool_arc = Arc::clone(&self.pool);
-        let outcome = py.allow_threads(|| {
+        let parse_result = py.allow_threads(|| {
             let mut pool = pool_arc.lock().expect("pool mutex poisoned");
-            let result = monomix_kernel::parse(source, &mut pool);
-            let has_errors = result
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == Severity::Error);
-            if has_errors {
-                Err(KernelError::Parse(result.diagnostics))
-            } else {
-                result
-                    .statements
-                    .last()
-                    .map(|stmt| stmt.expr)
-                    .ok_or_else(|| KernelError::Parse(Vec::new()))
-            }
+            monomix_kernel::parse(source, &mut pool)
         });
-        match outcome {
-            Ok(id) => Ok(Expr::new(Arc::clone(&self.pool), id)),
-            Err(KernelError::Parse(diags)) if diags.is_empty() => Err(PyErr::new::<ParseError, _>(
+        let has_errors = parse_result
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error);
+        if has_errors {
+            return Err(map_kernel_error(KernelError::Parse(parse_result.diagnostics)));
+        }
+        let stmts = parse_result.statements;
+        match stmts.len() {
+            0 => Err(PyErr::new::<ParseError, _>(
                 "empty input — no statements parsed",
             )),
-            Err(err) => Err(map_kernel_error(err)),
+            1 => Ok(Expr::new(Arc::clone(&self.pool), stmts[0].expr)),
+            n => Err(PyErr::new::<ParseError, _>(format!(
+                "parse() expects a single expression; got {} statements — \
+                 pass each one separately",
+                n
+            ))),
         }
     }
 }

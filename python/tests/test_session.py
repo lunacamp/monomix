@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from monomix import CrossSessionError, Session  # noqa: F401  (used in later phases)
+import pytest
+
+from monomix import CrossSessionError, ParseError, Session  # noqa: F401  (used in later phases)
 
 
 def test_session_yields_expr():
@@ -48,8 +50,13 @@ def test_parse_basic():
     assert e.kind == "Add"
 
 
+def test_parse_rejects_multiple_statements():
+    s = Session()
+    with pytest.raises(ParseError, match="expects a single expression"):
+        s.parse("x; y")
+
+
 def test_declare_sort():
-    import pytest
     s = Session()
     s.declare("n", "int")
     assert s.sort_of("n") == "int"
@@ -61,7 +68,6 @@ def test_declare_default_real():
 
 
 def test_declare_invalid_sort_raises():
-    import pytest
     s = Session()
     with pytest.raises(ValueError):
         s.declare("x", "complex")  # type: ignore[arg-type]  # deliberate bad sort
