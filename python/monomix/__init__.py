@@ -20,7 +20,9 @@ from monomix.errors import (
 )
 from monomix.session import Session
 
-__version__ = "0.0.1"
+# Single source of truth: the version baked into the compiled extension
+# (monomix-py's CARGO_PKG_VERSION). Avoids drift with a hardcoded literal.
+from monomix._kernel import __version__ as __version__
 
 __all__ = [
     "Expr",
