@@ -391,6 +391,12 @@ impl ExprPool {
         self.intern(ExprNode::List(items.into_boxed_slice()))
     }
 
+    // Comparison constructors do not fold constant operands (e.g. `lt(2, 3)`
+    // stays symbolic rather than collapsing to `BoolConst(true)`). Deciding the
+    // truth of a comparison over the reals is the job of the native decision
+    // procedures (ADR-0004), not of node construction. The propositional
+    // constructors below (`not_node`/`and_`/`or_`) only fold the purely
+    // Boolean algebra that is sound regardless of the comparison semantics.
     pub fn lt(&mut self, a: ExprId, b: ExprId) -> ExprId {
         self.intern(ExprNode::Lt(a, b))
     }
@@ -433,14 +439,14 @@ impl ExprPool {
             return false_id;
         }
         flat.retain(|&c| c != true_id);
+        flat.sort_unstable();
+        flat.dedup();
         if flat.is_empty() {
             return true_id;
         }
         if flat.len() == 1 {
             return flat[0];
         }
-        flat.sort_unstable();
-        flat.dedup();
         self.intern(ExprNode::And(flat.into_boxed_slice()))
     }
 
@@ -459,17 +465,20 @@ impl ExprPool {
             return true_id;
         }
         flat.retain(|&c| c != false_id);
+        flat.sort_unstable();
+        flat.dedup();
         if flat.is_empty() {
             return false_id;
         }
         if flat.len() == 1 {
             return flat[0];
         }
-        flat.sort_unstable();
-        flat.dedup();
         self.intern(ExprNode::Or(flat.into_boxed_slice()))
     }
 
+    // Like the comparison constructors, `implies` is left unnormalized
+    // (no `implies(false, _) → true` etc.); implication is rewritten/decided
+    // by the decision-procedure layer (ADR-0004), not at construction.
     pub fn implies(&mut self, a: ExprId, b: ExprId) -> ExprId {
         self.intern(ExprNode::Implies(a, b))
     }
@@ -1049,6 +1058,23 @@ mod tests {
         let ab = pool.and_(vec![a, b, a]);
         let ba = pool.and_(vec![b, a]);
         assert_eq!(ab, ba);
+    }
+
+    #[test]
+    fn and_dedup_to_single_operand_collapses() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        // Duplicate operands must collapse to the bare operand, not And([x]).
+        assert_eq!(pool.and_(vec![x, x]), x);
+        assert_eq!(pool.and_(vec![x, x, x]), x);
+    }
+
+    #[test]
+    fn or_dedup_to_single_operand_collapses() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        assert_eq!(pool.or_(vec![x, x]), x);
+        assert_eq!(pool.or_(vec![x, x, x]), x);
     }
 
     #[test]

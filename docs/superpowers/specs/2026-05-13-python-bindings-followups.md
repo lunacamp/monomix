@@ -49,3 +49,45 @@ The Python bindings work does not include:
   check.
 - `__bool__` of non-`Eq` expressions raises. Aligned with NumPy
   convention; documented.
+
+## Code-review findings (PR #3)
+
+Issues surfaced reviewing the bindings. The normalization bug was fixed
+in this branch; the rest are deferred with the rationale below.
+
+### Fixed
+
+- **Single-element `And` / `Or` from dedup.** `ExprPool::and_` / `or_`
+  ran the empty/singleton short-circuits *before* `sort` + `dedup`, so
+  duplicate operands that deduped down to one (e.g. `(x<y) & (x<y)`)
+  interned a degenerate `And([x])` instead of collapsing to `x`. Fixed
+  by reordering dedup before the length checks; covered by
+  `and_dedup_to_single_operand_collapses` / `or_dedup_…` in
+  `rust/monomix-kernel/src/expr/mod.rs`.
+
+### Deferred
+
+- **`solve` drops the solved-for variable.** `kernel_fns::solve`
+  flattens every substitution to its values
+  (`flat_map(|subst| subst.into_iter().map(|(_var, val)| …))`),
+  discarding which variable each value binds. Correct for Phase 1
+  single-variable solving (one var per solution → list of roots), but
+  multi-variable solving will need a richer return shape
+  (e.g. `list[dict[Expr, Expr]]`). Revisit when systems-solving is
+  exposed to Python.
+- **`bool` coerces to `int` in operators.** `coerce_to_expr` tries
+  `BigInt` before `f64`, and Python `bool` is an `int` subclass, so
+  `x + True` silently becomes `x + 1`. Harmless today; if a real
+  Boolean atom path is ever wanted from Python arithmetic, intercept
+  `bool` explicitly before the integer branch.
+- **`.expect("pool mutex poisoned")` panics across FFI.** Every pool
+  lock unwraps. A poisoned mutex (only reachable if a thread already
+  panicked while holding the lock) surfaces as a PyO3 panic/abort
+  rather than a clean `MonomixError`. The no-panic invariant covers
+  kernel-on-user-input, not lock poisoning, so risk is low — but if we
+  ever want a graceful story, map `PoisonError` to a `MonomixError`.
+- **`__hash__` / `__eq__` contract is non-standard.** `__eq__` returns
+  a symbolic `Eq` node and relies on `__bool__` for dict-key resolution
+  (SymPy-style). It works because hash-consing makes `__bool__` an
+  id-compare, but it is fragile: anything that calls `==` expecting a
+  `bool` gets an `Expr`. Documented as a hazard; no automated guard.

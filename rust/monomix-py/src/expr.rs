@@ -221,7 +221,16 @@ impl Expr {
     }
 
     fn __hash__(&self) -> u64 {
-        self.id.0 as u64
+        // Fold the pool identity into the hash alongside the node id. Within a
+        // Session every Expr shares one Arc, so equal (pool, id) → equal hash —
+        // the dict-key contract holds. Across Sessions, two Exprs that happen to
+        // share an id.0 now differ in hash, so a dict probe misses cleanly
+        // instead of colliding and raising CrossSessionError from __eq__.
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (Arc::as_ptr(&self.pool) as usize).hash(&mut h);
+        self.id.0.hash(&mut h);
+        h.finish()
     }
 
     fn __lt__(&self, other: &Bound<'_, PyAny>) -> PyResult<Expr> {
@@ -331,22 +340,7 @@ impl Expr {
 
     fn fn_name(&self) -> Option<String> {
         let pool = self.pool.lock().expect("pool mutex poisoned");
-        match pool.get(self.id) {
-            ExprNode::Fn(tag, _) => Some(match tag {
-                monomix_kernel::FnTag::Sin => "sin".to_string(),
-                monomix_kernel::FnTag::Cos => "cos".to_string(),
-                monomix_kernel::FnTag::Tan => "tan".to_string(),
-                monomix_kernel::FnTag::Exp => "exp".to_string(),
-                monomix_kernel::FnTag::Log => "log".to_string(),
-                monomix_kernel::FnTag::Sqrt => "sqrt".to_string(),
-                monomix_kernel::FnTag::Abs => "abs".to_string(),
-                monomix_kernel::FnTag::Asin => "asin".to_string(),
-                monomix_kernel::FnTag::Acos => "acos".to_string(),
-                monomix_kernel::FnTag::Atan => "atan".to_string(),
-                monomix_kernel::FnTag::Custom(s) => pool.str_of(*s).to_string(),
-            }),
-            _ => None,
-        }
+        fn_tag_name(&pool, self.id)
     }
 
     fn children(&self) -> Vec<Expr> {
@@ -359,6 +353,12 @@ impl Expr {
 }
 
 fn render_node(pool: &ExprPool, id: ExprId) -> String {
+    let join = |ids: &[ExprId]| {
+        ids.iter()
+            .map(|&c| render_node(pool, c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     match pool.get(id) {
         ExprNode::SmallInt(n) => n.to_string(),
         ExprNode::BigInt(b) => b.to_string(),
@@ -367,6 +367,47 @@ fn render_node(pool: &ExprPool, id: ExprId) -> String {
         ExprNode::Symbol(s) => pool.str_of(*s).to_string(),
         ExprNode::String(s) => format!("\"{}\"", pool.str_of(*s)),
         ExprNode::BoolConst(b) => b.to_string(),
-        _ => format!("<{:?}>", id),
+        ExprNode::Add(c) => format!("Add({})", join(c)),
+        ExprNode::Mul(c) => format!("Mul({})", join(c)),
+        ExprNode::List(c) => format!("List({})", join(c)),
+        ExprNode::And(c) => format!("And({})", join(c)),
+        ExprNode::Or(c) => format!("Or({})", join(c)),
+        ExprNode::Pow(a, b) => format!("Pow({}, {})", render_node(pool, *a), render_node(pool, *b)),
+        ExprNode::Div(a, b) => format!("Div({}, {})", render_node(pool, *a), render_node(pool, *b)),
+        ExprNode::Eq(a, b) => format!("Eq({}, {})", render_node(pool, *a), render_node(pool, *b)),
+        ExprNode::Lt(a, b) => format!("Lt({}, {})", render_node(pool, *a), render_node(pool, *b)),
+        ExprNode::Le(a, b) => format!("Le({}, {})", render_node(pool, *a), render_node(pool, *b)),
+        ExprNode::Gt(a, b) => format!("Gt({}, {})", render_node(pool, *a), render_node(pool, *b)),
+        ExprNode::Ge(a, b) => format!("Ge({}, {})", render_node(pool, *a), render_node(pool, *b)),
+        ExprNode::Implies(a, b) => {
+            format!("Implies({}, {})", render_node(pool, *a), render_node(pool, *b))
+        }
+        ExprNode::Neg(x) => format!("Neg({})", render_node(pool, *x)),
+        ExprNode::Not(x) => format!("Not({})", render_node(pool, *x)),
+        ExprNode::Fn(_, args) => {
+            let name = fn_tag_name(pool, id);
+            format!("{}({})", name.unwrap_or_else(|| "fn".to_string()), join(args))
+        }
+    }
+}
+
+/// Render a function node's name (mirrors `Expr::fn_name`).
+fn fn_tag_name(pool: &ExprPool, id: ExprId) -> Option<String> {
+    use monomix_kernel::FnTag;
+    match pool.get(id) {
+        ExprNode::Fn(tag, _) => Some(match tag {
+            FnTag::Sin => "sin".to_string(),
+            FnTag::Cos => "cos".to_string(),
+            FnTag::Tan => "tan".to_string(),
+            FnTag::Exp => "exp".to_string(),
+            FnTag::Log => "log".to_string(),
+            FnTag::Sqrt => "sqrt".to_string(),
+            FnTag::Abs => "abs".to_string(),
+            FnTag::Asin => "asin".to_string(),
+            FnTag::Acos => "acos".to_string(),
+            FnTag::Atan => "atan".to_string(),
+            FnTag::Custom(s) => pool.str_of(*s).to_string(),
+        }),
+        _ => None,
     }
 }
