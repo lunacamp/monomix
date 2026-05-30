@@ -1,6 +1,7 @@
 use crate::errors::CrossSessionError;
 use monomix_kernel::{ExprId, ExprNode, ExprPool};
 use num_bigint::BigInt;
+use num_traits::Signed;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::sync::{Arc, Mutex};
@@ -60,6 +61,14 @@ impl Expr {
     fn __repr__(&self) -> String {
         let pool = self.pool.lock().expect("pool mutex poisoned");
         format!("Expr({})", render_node(&pool, self.id))
+    }
+
+    /// Human-readable infix serialization, e.g. `(1 + x)*(x + 2)`.
+    /// `__repr__` keeps the structural form for debugging; `str(expr)`
+    /// gives math notation.
+    fn __str__(&self) -> String {
+        let pool = self.pool.lock().expect("pool mutex poisoned");
+        render_infix(&pool, self.id, 0)
     }
 
     fn is_same(&self, other: &Expr) -> bool {
@@ -387,6 +396,208 @@ fn render_node(pool: &ExprPool, id: ExprId) -> String {
         ExprNode::Fn(_, args) => {
             let name = fn_tag_name(pool, id);
             format!("{}({})", name.unwrap_or_else(|| "fn".to_string()), join(args))
+        }
+    }
+}
+
+// --- Infix serialization (`__str__`) ------------------------------------
+//
+// Precedence ladder: a child is parenthesized when its own precedence is
+// lower than the context it is rendered into. Higher binds tighter.
+const P_OR: u8 = 1;
+const P_AND: u8 = 2;
+const P_CMP: u8 = 3; // =, <, <=, >, >=, =>
+const P_ADD: u8 = 4;
+const P_MUL: u8 = 5; // * and /
+const P_UNARY: u8 = 6; // leading - / ~
+const P_POW: u8 = 7;
+const P_ATOM: u8 = 8;
+
+/// Render `id` as infix math, parenthesizing if its precedence is below
+/// `parent`.
+fn render_infix(pool: &ExprPool, id: ExprId, parent: u8) -> String {
+    let (s, prec) = render_infix_prec(pool, id);
+    if prec < parent {
+        format!("({s})")
+    } else {
+        s
+    }
+}
+
+/// Classify a single `Mul` factor into numeric vs. non-numeric magnitude
+/// strings (numerics are emitted first so coefficients lead the product).
+fn push_factor(pool: &ExprPool, id: ExprId, nums: &mut Vec<String>, others: &mut Vec<String>) {
+    match pool.get(id) {
+        ExprNode::SmallInt(1) => {} // drop unit coefficient
+        ExprNode::SmallInt(n) => nums.push(n.to_string()),
+        ExprNode::BigInt(b) => nums.push(b.to_string()),
+        ExprNode::Rational(r) => nums.push(format!("{}/{}", r.0, r.1)),
+        _ => others.push(render_infix(pool, id, P_MUL)),
+    }
+}
+
+/// Render a product, factoring out an overall sign. Returns
+/// `(is_negative, magnitude)` so callers can emit `a - b` instead of
+/// `a + -b`.
+fn render_mul(pool: &ExprPool, children: &[ExprId]) -> (bool, String) {
+    let mut neg = false;
+    let mut nums: Vec<String> = Vec::new();
+    let mut others: Vec<String> = Vec::new();
+    for &c in children {
+        match pool.get(c) {
+            ExprNode::Neg(x) => {
+                neg = !neg;
+                push_factor(pool, *x, &mut nums, &mut others);
+            }
+            ExprNode::SmallInt(n) if *n < 0 => {
+                neg = !neg;
+                let m = n.unsigned_abs();
+                if m != 1 {
+                    nums.push(m.to_string());
+                }
+            }
+            ExprNode::BigInt(b) if b.is_negative() => {
+                neg = !neg;
+                nums.push((-(&**b)).to_string());
+            }
+            ExprNode::Rational(r) if r.0.is_negative() => {
+                neg = !neg;
+                nums.push(format!("{}/{}", -(&r.0), r.1));
+            }
+            _ => push_factor(pool, c, &mut nums, &mut others),
+        }
+    }
+    nums.extend(others);
+    let mag = if nums.is_empty() {
+        "1".to_string()
+    } else {
+        nums.join("*")
+    };
+    (neg, mag)
+}
+
+/// Render an `Add` term with its sign split off, for subtraction joining.
+fn signed_term(pool: &ExprPool, id: ExprId) -> (bool, String) {
+    match pool.get(id) {
+        ExprNode::Neg(x) => (true, render_infix(pool, *x, P_MUL)),
+        ExprNode::SmallInt(n) if *n < 0 => (true, n.unsigned_abs().to_string()),
+        ExprNode::BigInt(b) if b.is_negative() => (true, (-(&**b)).to_string()),
+        ExprNode::Rational(r) if r.0.is_negative() => (true, format!("{}/{}", -(&r.0), r.1)),
+        ExprNode::Mul(c) => render_mul(pool, c),
+        _ => (false, render_infix(pool, id, P_ADD)),
+    }
+}
+
+fn render_infix_prec(pool: &ExprPool, id: ExprId) -> (String, u8) {
+    let bin = |a: &ExprId, b: &ExprId, op: &str, prec: u8| {
+        (
+            format!(
+                "{} {} {}",
+                render_infix(pool, *a, prec),
+                op,
+                render_infix(pool, *b, prec)
+            ),
+            prec,
+        )
+    };
+    match pool.get(id) {
+        ExprNode::SmallInt(n) => (n.to_string(), if *n < 0 { P_UNARY } else { P_ATOM }),
+        ExprNode::BigInt(b) => (b.to_string(), if b.is_negative() { P_UNARY } else { P_ATOM }),
+        ExprNode::Rational(r) => (
+            format!("{}/{}", r.0, r.1),
+            if r.0.is_negative() { P_UNARY } else { P_MUL },
+        ),
+        ExprNode::Float(f) => {
+            let v = f.into_inner();
+            (v.to_string(), if v < 0.0 { P_UNARY } else { P_ATOM })
+        }
+        ExprNode::Symbol(s) => (pool.str_of(*s).to_string(), P_ATOM),
+        ExprNode::String(s) => (format!("\"{}\"", pool.str_of(*s)), P_ATOM),
+        ExprNode::BoolConst(b) => (b.to_string(), P_ATOM),
+        ExprNode::Add(c) => {
+            let mut out = String::new();
+            for (i, &child) in c.iter().enumerate() {
+                let (neg, mag) = signed_term(pool, child);
+                if i == 0 {
+                    if neg {
+                        out.push('-');
+                    }
+                } else {
+                    out.push_str(if neg { " - " } else { " + " });
+                }
+                out.push_str(&mag);
+            }
+            (out, P_ADD)
+        }
+        ExprNode::Mul(c) => {
+            let (neg, mag) = render_mul(pool, c);
+            if neg {
+                (format!("-{mag}"), P_UNARY)
+            } else {
+                (mag, P_MUL)
+            }
+        }
+        ExprNode::Div(a, b) => (
+            format!(
+                "{}/{}",
+                render_infix(pool, *a, P_MUL),
+                render_infix(pool, *b, P_UNARY)
+            ),
+            P_MUL,
+        ),
+        ExprNode::Pow(a, b) => (
+            format!(
+                "{}^{}",
+                render_infix(pool, *a, P_POW),
+                render_infix(pool, *b, P_POW)
+            ),
+            P_POW,
+        ),
+        ExprNode::Neg(x) => (format!("-{}", render_infix(pool, *x, P_UNARY)), P_UNARY),
+        ExprNode::Not(x) => (format!("~{}", render_infix(pool, *x, P_UNARY)), P_UNARY),
+        ExprNode::Eq(a, b) => bin(a, b, "=", P_CMP),
+        ExprNode::Lt(a, b) => bin(a, b, "<", P_CMP),
+        ExprNode::Le(a, b) => bin(a, b, "<=", P_CMP),
+        ExprNode::Gt(a, b) => bin(a, b, ">", P_CMP),
+        ExprNode::Ge(a, b) => bin(a, b, ">=", P_CMP),
+        ExprNode::Implies(a, b) => bin(a, b, "=>", P_CMP),
+        ExprNode::And(c) => (
+            c.iter()
+                .map(|&x| render_infix(pool, x, P_AND))
+                .collect::<Vec<_>>()
+                .join(" & "),
+            P_AND,
+        ),
+        ExprNode::Or(c) => (
+            c.iter()
+                .map(|&x| render_infix(pool, x, P_OR))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            P_OR,
+        ),
+        ExprNode::List(c) => (
+            format!(
+                "[{}]",
+                c.iter()
+                    .map(|&x| render_infix(pool, x, 0))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            P_ATOM,
+        ),
+        ExprNode::Fn(_, args) => {
+            let name = fn_tag_name(pool, id).unwrap_or_else(|| "fn".to_string());
+            (
+                format!(
+                    "{}({})",
+                    name,
+                    args.iter()
+                        .map(|&x| render_infix(pool, x, 0))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                P_ATOM,
+            )
         }
     }
 }
