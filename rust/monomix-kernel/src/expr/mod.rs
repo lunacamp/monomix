@@ -57,6 +57,19 @@ pub enum ExprNode {
     Eq(ExprId, ExprId),
     Fn(FnTag, Box<[ExprId]>),
     List(Box<[ExprId]>),
+
+    // Comparison
+    Lt(ExprId, ExprId),
+    Le(ExprId, ExprId),
+    Gt(ExprId, ExprId),
+    Ge(ExprId, ExprId),
+
+    // Propositional
+    Not(ExprId),
+    And(Box<[ExprId]>),
+    Or(Box<[ExprId]>),
+    Implies(ExprId, ExprId),
+    BoolConst(bool),
 }
 
 // Compile-time size guard — fails compilation if ExprNode exceeds the
@@ -160,30 +173,39 @@ impl ExprPool {
             ExprNode::Rational(b) => { b.0.hash(&mut h); b.1.hash(&mut h); }
             ExprNode::Float(f) => f.hash(&mut h),
             ExprNode::Symbol(s) | ExprNode::String(s) => s.hash(&mut h),
-            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c) => {
+            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c)
+            | ExprNode::And(c) | ExprNode::Or(c) => {
                 for id in c.iter() { id.hash(&mut h); }
             }
-            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b) => {
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b)
+            | ExprNode::Lt(a, b) | ExprNode::Le(a, b)
+            | ExprNode::Gt(a, b) | ExprNode::Ge(a, b)
+            | ExprNode::Implies(a, b) => {
                 a.hash(&mut h); b.hash(&mut h);
             }
-            ExprNode::Neg(x) => x.hash(&mut h),
+            ExprNode::Neg(x) | ExprNode::Not(x) => x.hash(&mut h),
             ExprNode::Fn(tag, args) => {
                 tag.hash(&mut h);
                 for id in args.iter() { id.hash(&mut h); }
             }
+            ExprNode::BoolConst(b) => b.hash(&mut h),
         }
         h.finish()
     }
 
     fn subtree_size_of(node: &ExprNode, nodes: &[ArenaEntry]) -> u32 {
         let children: &[ExprId] = match node {
-            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c) => c,
+            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c)
+            | ExprNode::And(c) | ExprNode::Or(c) => c,
             ExprNode::Fn(_, c) => c,
-            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b) => {
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b)
+            | ExprNode::Lt(a, b) | ExprNode::Le(a, b)
+            | ExprNode::Gt(a, b) | ExprNode::Ge(a, b)
+            | ExprNode::Implies(a, b) => {
                 return 1 + nodes[a.0 as usize].subtree_size
                          + nodes[b.0 as usize].subtree_size;
             }
-            ExprNode::Neg(x) => return 1 + nodes[x.0 as usize].subtree_size,
+            ExprNode::Neg(x) | ExprNode::Not(x) => return 1 + nodes[x.0 as usize].subtree_size,
             _ => return 1,
         };
         1 + children.iter().map(|c| nodes[c.0 as usize].subtree_size).sum::<u32>()
@@ -369,6 +391,102 @@ impl ExprPool {
         self.intern(ExprNode::List(items.into_boxed_slice()))
     }
 
+    // Comparison constructors do not fold constant operands (e.g. `lt(2, 3)`
+    // stays symbolic rather than collapsing to `BoolConst(true)`). Deciding the
+    // truth of a comparison over the reals is the job of the native decision
+    // procedures (ADR-0004), not of node construction. The propositional
+    // constructors below (`not_node`/`and_`/`or_`) only fold the purely
+    // Boolean algebra that is sound regardless of the comparison semantics.
+    pub fn lt(&mut self, a: ExprId, b: ExprId) -> ExprId {
+        self.intern(ExprNode::Lt(a, b))
+    }
+
+    pub fn le(&mut self, a: ExprId, b: ExprId) -> ExprId {
+        self.intern(ExprNode::Le(a, b))
+    }
+
+    pub fn gt(&mut self, a: ExprId, b: ExprId) -> ExprId {
+        self.intern(ExprNode::Gt(a, b))
+    }
+
+    pub fn ge(&mut self, a: ExprId, b: ExprId) -> ExprId {
+        self.intern(ExprNode::Ge(a, b))
+    }
+
+    pub fn not_node(&mut self, x: ExprId) -> ExprId {
+        if let ExprNode::Not(inner) = *self.get(x) {
+            return inner; // not(not(x)) → x
+        }
+        if let ExprNode::BoolConst(b) = *self.get(x) {
+            return self.bool_const(!b);
+        }
+        self.intern(ExprNode::Not(x))
+    }
+
+    pub fn and_(&mut self, children: Vec<ExprId>) -> ExprId {
+        // Flatten nested And nodes
+        let mut flat: Vec<ExprId> = Vec::with_capacity(children.len());
+        for c in children {
+            if let ExprNode::And(inner) = self.get(c).clone() {
+                flat.extend_from_slice(&inner);
+            } else {
+                flat.push(c);
+            }
+        }
+        let true_id = self.bool_const(true);
+        let false_id = self.bool_const(false);
+        if flat.iter().any(|&c| c == false_id) {
+            return false_id;
+        }
+        flat.retain(|&c| c != true_id);
+        flat.sort_unstable();
+        flat.dedup();
+        if flat.is_empty() {
+            return true_id;
+        }
+        if flat.len() == 1 {
+            return flat[0];
+        }
+        self.intern(ExprNode::And(flat.into_boxed_slice()))
+    }
+
+    pub fn or_(&mut self, children: Vec<ExprId>) -> ExprId {
+        let mut flat: Vec<ExprId> = Vec::with_capacity(children.len());
+        for c in children {
+            if let ExprNode::Or(inner) = self.get(c).clone() {
+                flat.extend_from_slice(&inner);
+            } else {
+                flat.push(c);
+            }
+        }
+        let true_id = self.bool_const(true);
+        let false_id = self.bool_const(false);
+        if flat.iter().any(|&c| c == true_id) {
+            return true_id;
+        }
+        flat.retain(|&c| c != false_id);
+        flat.sort_unstable();
+        flat.dedup();
+        if flat.is_empty() {
+            return false_id;
+        }
+        if flat.len() == 1 {
+            return flat[0];
+        }
+        self.intern(ExprNode::Or(flat.into_boxed_slice()))
+    }
+
+    // Like the comparison constructors, `implies` is left unnormalized
+    // (no `implies(false, _) → true` etc.); implication is rewritten/decided
+    // by the decision-procedure layer (ADR-0004), not at construction.
+    pub fn implies(&mut self, a: ExprId, b: ExprId) -> ExprId {
+        self.intern(ExprNode::Implies(a, b))
+    }
+
+    pub fn bool_const(&mut self, b: bool) -> ExprId {
+        self.intern(ExprNode::BoolConst(b))
+    }
+
     // --- Access -------------------------------------------------------------
 
     pub fn get(&self, id: ExprId) -> &ExprNode {
@@ -386,10 +504,14 @@ impl ExprPool {
     /// hold two separate fields, not a slice).
     pub fn children(&self, id: ExprId) -> Vec<ExprId> {
         match &self.nodes[id.0 as usize].node {
-            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c) => c.to_vec(),
+            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c)
+            | ExprNode::And(c) | ExprNode::Or(c) => c.to_vec(),
             ExprNode::Fn(_, c) => c.to_vec(),
-            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b) => vec![*a, *b],
-            ExprNode::Neg(x) => vec![*x],
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b)
+            | ExprNode::Lt(a, b) | ExprNode::Le(a, b)
+            | ExprNode::Gt(a, b) | ExprNode::Ge(a, b)
+            | ExprNode::Implies(a, b) => vec![*a, *b],
+            ExprNode::Neg(x) | ExprNode::Not(x) => vec![*x],
             _ => Vec::new(),
         }
     }
@@ -400,7 +522,8 @@ impl ExprPool {
     pub fn is_atom(&self, id: ExprId) -> bool {
         matches!(self.get(id),
             ExprNode::SmallInt(_) | ExprNode::BigInt(_) | ExprNode::Rational(_)
-            | ExprNode::Float(_) | ExprNode::Symbol(_) | ExprNode::String(_))
+            | ExprNode::Float(_) | ExprNode::Symbol(_) | ExprNode::String(_)
+            | ExprNode::BoolConst(_))
     }
 
     pub fn is_numeric(&self, id: ExprId) -> bool {
@@ -440,7 +563,8 @@ impl ExprPool {
         let node = &self.nodes[id.0 as usize].node;
         // Visit children first (bottom-up)
         let acc = match node {
-            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c) => {
+            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::List(c)
+            | ExprNode::And(c) | ExprNode::Or(c) => {
                 let ids: Vec<ExprId> = c.to_vec();
                 ids.iter().fold(acc, |a, &child| self.fold_impl(child, a, f, visited))
             }
@@ -448,12 +572,15 @@ impl ExprPool {
                 let ids: Vec<ExprId> = c.to_vec();
                 ids.iter().fold(acc, |a, &child| self.fold_impl(child, a, f, visited))
             }
-            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b) => {
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Eq(a, b)
+            | ExprNode::Lt(a, b) | ExprNode::Le(a, b)
+            | ExprNode::Gt(a, b) | ExprNode::Ge(a, b)
+            | ExprNode::Implies(a, b) => {
                 let (a, b) = (*a, *b);
                 let acc = self.fold_impl(a, acc, f, visited);
                 self.fold_impl(b, acc, f, visited)
             }
-            ExprNode::Neg(x) => { let x = *x; self.fold_impl(x, acc, f, visited) }
+            ExprNode::Neg(x) | ExprNode::Not(x) => { let x = *x; self.fold_impl(x, acc, f, visited) }
             _ => acc,
         };
         f(acc, id, &self.nodes[id.0 as usize].node)
@@ -512,6 +639,44 @@ impl ExprPool {
                 let ids: Vec<ExprId> = c.iter().map(|&child| self.map_bottom_up(child, cache, f)).collect();
                 self.list(ids)
             }
+            ExprNode::Lt(a, b) => {
+                let a2 = self.map_bottom_up(a, cache, f);
+                let b2 = self.map_bottom_up(b, cache, f);
+                self.lt(a2, b2)
+            }
+            ExprNode::Le(a, b) => {
+                let a2 = self.map_bottom_up(a, cache, f);
+                let b2 = self.map_bottom_up(b, cache, f);
+                self.le(a2, b2)
+            }
+            ExprNode::Gt(a, b) => {
+                let a2 = self.map_bottom_up(a, cache, f);
+                let b2 = self.map_bottom_up(b, cache, f);
+                self.gt(a2, b2)
+            }
+            ExprNode::Ge(a, b) => {
+                let a2 = self.map_bottom_up(a, cache, f);
+                let b2 = self.map_bottom_up(b, cache, f);
+                self.ge(a2, b2)
+            }
+            ExprNode::Not(x) => {
+                let x2 = self.map_bottom_up(x, cache, f);
+                self.not_node(x2)
+            }
+            ExprNode::And(c) => {
+                let ids: Vec<ExprId> = c.iter().map(|&child| self.map_bottom_up(child, cache, f)).collect();
+                self.and_(ids)
+            }
+            ExprNode::Or(c) => {
+                let ids: Vec<ExprId> = c.iter().map(|&child| self.map_bottom_up(child, cache, f)).collect();
+                self.or_(ids)
+            }
+            ExprNode::Implies(a, b) => {
+                let a2 = self.map_bottom_up(a, cache, f);
+                let b2 = self.map_bottom_up(b, cache, f);
+                self.implies(a2, b2)
+            }
+            ExprNode::BoolConst(_) => root,
             _ => root, // atoms map to themselves
         };
         let result = f(self, mapped_node);
@@ -738,6 +903,81 @@ mod tests {
     }
 
     #[test]
+    fn new_variants_exist_and_intern() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let _ = pool.lt(x, y);
+        let _ = pool.le(x, y);
+        let _ = pool.gt(x, y);
+        let _ = pool.ge(x, y);
+        let _ = pool.not_node(x);
+        let _ = pool.and_(vec![x, y]);
+        let _ = pool.or_(vec![x, y]);
+        let _ = pool.implies(x, y);
+        let _ = pool.bool_const(true);
+        let _ = pool.bool_const(false);
+    }
+
+    #[test]
+    fn new_variants_subtree_size() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let lt = pool.lt(x, y);
+        assert_eq!(pool.subtree_size(lt), 3); // Lt + x + y
+
+        let and_node = pool.and_(vec![x, y]);
+        assert_eq!(pool.subtree_size(and_node), 3);
+
+        let nt = pool.not_node(x);
+        assert_eq!(pool.subtree_size(nt), 2);
+
+        let bc = pool.bool_const(true);
+        assert_eq!(pool.subtree_size(bc), 1);
+    }
+
+    #[test]
+    fn new_variants_children() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let lt = pool.lt(x, y);
+        assert_eq!(pool.children(lt), vec![x, y]);
+
+        let and_node = pool.and_(vec![x, y]);
+        assert_eq!(pool.children(and_node), vec![x, y]);
+
+        let nt = pool.not_node(x);
+        assert_eq!(pool.children(nt), vec![x]);
+
+        let bc = pool.bool_const(false);
+        assert_eq!(pool.children(bc), Vec::<ExprId>::new());
+    }
+
+    #[test]
+    fn bool_const_is_atom() {
+        let mut pool = ExprPool::new();
+        let bc = pool.bool_const(true);
+        assert!(pool.is_atom(bc));
+        assert!(!pool.is_numeric(bc));
+    }
+
+    #[test]
+    fn map_bottom_up_recurses_into_new_variants() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let y = pool.symbol("y");
+        let lt = pool.lt(x, y);
+        let result = pool.map_bottom_up_fresh(lt, &mut |_pool, id| id);
+        assert_eq!(result, lt);
+
+        let and_node = pool.and_(vec![x, y]);
+        let result = pool.map_bottom_up_fresh(and_node, &mut |_pool, id| id);
+        assert_eq!(result, and_node);
+    }
+
+    #[test]
     fn string_interning_roundtrip() {
         let mut pool = ExprPool::new();
         let id = pool.symbol("hello");
@@ -746,6 +986,105 @@ mod tests {
         } else {
             panic!("expected Symbol");
         }
+    }
+
+    #[test]
+    fn not_double_negation() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let not_x = pool.not_node(x);
+        let not_not_x = pool.not_node(not_x);
+        assert_eq!(not_not_x, x);
+    }
+
+    #[test]
+    fn not_of_bool_const_folds() {
+        let mut pool = ExprPool::new();
+        let t = pool.bool_const(true);
+        let f = pool.bool_const(false);
+        assert_eq!(pool.not_node(t), f);
+        assert_eq!(pool.not_node(f), t);
+    }
+
+    #[test]
+    fn and_short_circuits_on_false() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let f = pool.bool_const(false);
+        assert_eq!(pool.and_(vec![x, f]), f);
+    }
+
+    #[test]
+    fn and_drops_true_operands() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let t = pool.bool_const(true);
+        assert_eq!(pool.and_(vec![x, t]), x);
+    }
+
+    #[test]
+    fn or_short_circuits_on_true() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let t = pool.bool_const(true);
+        assert_eq!(pool.or_(vec![x, t]), t);
+    }
+
+    #[test]
+    fn or_drops_false_operands() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        let f = pool.bool_const(false);
+        assert_eq!(pool.or_(vec![x, f]), x);
+    }
+
+    #[test]
+    fn and_flattens() {
+        let mut pool = ExprPool::new();
+        let a = pool.symbol("a");
+        let b = pool.symbol("b");
+        let c = pool.symbol("c");
+        let ab = pool.and_(vec![a, b]);
+        let abc = pool.and_(vec![ab, c]);
+        let expected = pool.and_(vec![a, b, c]);
+        assert_eq!(abc, expected);
+    }
+
+    #[test]
+    fn and_sorts_and_dedups() {
+        let mut pool = ExprPool::new();
+        let a = pool.symbol("a");
+        let b = pool.symbol("b");
+        let ab = pool.and_(vec![a, b, a]);
+        let ba = pool.and_(vec![b, a]);
+        assert_eq!(ab, ba);
+    }
+
+    #[test]
+    fn and_dedup_to_single_operand_collapses() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        // Duplicate operands must collapse to the bare operand, not And([x]).
+        assert_eq!(pool.and_(vec![x, x]), x);
+        assert_eq!(pool.and_(vec![x, x, x]), x);
+    }
+
+    #[test]
+    fn or_dedup_to_single_operand_collapses() {
+        let mut pool = ExprPool::new();
+        let x = pool.symbol("x");
+        assert_eq!(pool.or_(vec![x, x]), x);
+        assert_eq!(pool.or_(vec![x, x, x]), x);
+    }
+
+    #[test]
+    fn bool_const_interning_idempotent() {
+        let mut pool = ExprPool::new();
+        let t1 = pool.bool_const(true);
+        let t2 = pool.bool_const(true);
+        assert_eq!(t1, t2);
+        let f1 = pool.bool_const(false);
+        assert_ne!(t1, f1);
     }
 }
 

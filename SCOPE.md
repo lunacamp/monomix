@@ -346,6 +346,9 @@ Linear constraint programming. **Complexity:** Very high. **Estimate:** 12+ week
 #### 3.7 Numerical ODE Solvers
 Runge-Kutta, symplectic integrators. **Complexity:** Medium. **Estimate:** 6-8 weeks; consider a separate package.
 
+#### 3.8 Native Decision Procedures
+SMT-style reasoning over monomix's own theories — satisfiability, `prove` / `decide` / `assume`, and simplification under assumptions — implemented natively in the Rust kernel (no external solver; distinct from the user-facing constraint programming in §3.6). Tiered: (1) linear real arithmetic, (2) univariate nonlinear sign reasoning, (3) linear integer arithmetic, (4) multivariate nonlinear real (CAD / nlsat) as an open-ended frontier. Tiers 1–2 may pull forward to support the Phase 2 assumption store and piecewise simplifier. **Complexity:** High to very high (tier 4 is research-grade). **Note:** Direction set by [ADR-0004](decisions/0004-native-decision-procedures.md), superseding ADR-0003; phasing pinned by `designs/decision-procedures.md` (forthcoming).
+
 ### Process for Phase 3+ Decisions
 1. **Demand check:** Concrete user request or research priority documented.
 2. **Scope check:** Feature fits the CAS domain rather than expanding it.
@@ -365,7 +368,7 @@ These will **never** be part of this project, even after all phases:
 | **Graphing/plotting** | Use external tools (matplotlib, plotly) via integration if needed |
 | **Statistics/probability** | Use NumPy/SciPy/R |
 | **Constraint logic programming** | Requires Prolog-like execution model |
-| **Symbolic verification** | SAT/SMT solvers are orthogonal; integrate Z3 if needed |
+| **General theorem proving / program verification** | Out of scope. Monomix has *native* decision procedures for its own algebraic subproblems ([ADR-0004](decisions/0004-native-decision-procedures.md), §3.8), but is not a general verifier or an external-SMT frontend |
 | **GPU acceleration** | Out of scope unless a clear algebraic use case emerges |
 | **Distributed computation** | Single-node architecture by design |
 | **Natural language input** | Parsing math from English is a separate project |

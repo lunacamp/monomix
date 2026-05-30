@@ -8,8 +8,9 @@ LangChain).
 
 **Status: planning + early scaffolding.** The architectural decisions are
 captured in `decisions/`; design notes for individual subsystems are in
-`designs/`; the only code in tree today is the SMT bridge under `python/`
-(see `python/README.md`).
+`designs/`. The code in tree today is the Rust symbolic kernel
+(`rust/monomix-kernel/`) and its Python bindings (`rust/monomix-py/`,
+`python/`); see `python/README.md`.
 
 For the full project plan, phase breakdown, and in-scope/out-of-scope
 boundaries, read `SCOPE.md`.
@@ -28,7 +29,8 @@ boundaries, read `SCOPE.md`.
     │   ├── monomix/
     │   └── tests/
     ├── rust/                -- Rust crates (workspace members)
-    │   └── solver-bridge/   -- Phase-2 native bridge to Z3 (sketch)
+    │   ├── monomix-kernel/  -- Phase-1 symbolic kernel
+    │   └── monomix-py/      -- PyO3 bindings to the kernel
     └── legacy/              -- REDUCE r7357 source, gitignored,
                                 used as a correctness oracle
 
