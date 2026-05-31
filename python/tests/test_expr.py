@@ -163,3 +163,38 @@ def test_cross_session_eq_raises():
     b = s2.symbol("y")
     with pytest.raises(CrossSessionError):
         _ = (a == b)
+
+
+def test_str_infix_atoms(s, x):
+    assert str(x) == "x"
+    assert str(s.integer(3)) == "3"
+    assert str(s.rational(3, 4)) == "3/4"
+
+
+def test_str_infix_product_and_power(s, x):
+    e = (x + s.integer(1)) * (x + s.integer(2))
+    assert str(e) == "(1 + x)*(x + 2)"
+    assert str(x ** s.integer(2)) == "x^2"
+    assert str((x + s.integer(1)) ** s.integer(2)) == "(1 + x)^2"
+
+
+def test_str_subtraction_not_plus_minus(s, x, y):
+    # Negative terms render with " - ", never " + -".
+    assert str(x - y) == "x - y"
+    assert str(x - s.integer(3) * y) == "x - 3*y"
+    assert str(-x) == "-x"
+    assert " + -" not in str(s.integer(3) * x - s.integer(1))
+
+
+def test_str_relational_and_boolean(s, x, y):
+    assert str(x < y) == "x < y"
+    assert str(x >= y) == "x >= y"
+    assert str(x == y) == "x = y"
+    assert str(~(x < y)) == "~(x < y)"
+
+
+def test_repr_stays_structural(s, x):
+    # repr is the debug form; str is the math form. Keep them distinct.
+    e = (x + s.integer(1)) * (x + s.integer(2))
+    assert repr(e).startswith("Expr(")
+    assert repr(e) != str(e)
